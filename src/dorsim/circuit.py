@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
@@ -21,73 +22,71 @@ class Circuit:
         self.operations.append(Operation(name.upper(), tuple(map(int, targets)), float(p)))
         return self
 
-    def h(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("H", q)
-        return self
+    def _targets(self, targets: Iterable[int]) -> tuple[int, ...]:
+        return tuple(map(int, targets))
 
-    def s(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("S", q)
-        return self
+    def _append_targets(self, name: str, targets: Iterable[int], *, p: float = 0.0) -> "Circuit":
+        return self.append(name, *self._targets(targets), p=p)
 
-    def sdg(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("S_DAG", q)
-        return self
+    def _append_pair_targets(self, name: str, targets: Iterable[int]) -> "Circuit":
+        flat = self._targets(targets)
+        assert len(flat) % 2 == 0
+        return self.append(name, *flat)
 
-    def x(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("X", q)
-        return self
+    def h(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("H", targets)
 
-    def y(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("Y", q)
-        return self
+    def s(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("S", targets)
 
-    def z(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("Z", q)
-        return self
+    def sdg(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("S_DAG", targets)
 
-    def cx(self, control: int, target: int) -> "Circuit":
-        return self.append("CX", control, target)
+    def x(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("X", targets)
 
-    def cy(self, control: int, target: int) -> "Circuit":
-        return self.append("CY", control, target)
+    def y(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("Y", targets)
 
-    def cz(self, a: int, b: int) -> "Circuit":
-        return self.append("CZ", a, b)
+    def z(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("Z", targets)
 
-    def swap(self, a: int, b: int) -> "Circuit":
-        return self.append("SWAP", a, b)
+    def cx(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_pair_targets("CX", targets)
 
-    def m(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("M", q)
-        return self
+    def cy(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_pair_targets("CY", targets)
 
-    def r(self, *targets: int) -> "Circuit":
-        for q in targets:
-            self.append("R", q)
-        return self
+    def cz(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_pair_targets("CZ", targets)
 
-    def x_error(self, target: int, p: float) -> "Circuit":
-        return self.append("X_ERROR", target, p=p)
+    def swap(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_pair_targets("SWAP", targets)
 
-    def y_error(self, target: int, p: float) -> "Circuit":
-        return self.append("Y_ERROR", target, p=p)
+    def m(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("M", targets)
 
-    def z_error(self, target: int, p: float) -> "Circuit":
-        return self.append("Z_ERROR", target, p=p)
+    def mx(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("MX", targets)
 
-    def depolarize1(self, target: int, p: float) -> "Circuit":
-        return self.append("DEPOLARIZE1", target, p=p)
+    def r(self, targets: Iterable[int]) -> "Circuit":
+        return self._append_targets("R", targets)
+
+    def x_error(self, targets: Iterable[int], p: float) -> "Circuit":
+        return self._append_targets("X_ERROR", targets, p=p)
+
+    def y_error(self, targets: Iterable[int], p: float) -> "Circuit":
+        return self._append_targets("Y_ERROR", targets, p=p)
+
+    def z_error(self, targets: Iterable[int], p: float) -> "Circuit":
+        return self._append_targets("Z_ERROR", targets, p=p)
+
+    def depolarize1(self, targets: Iterable[int], p: float) -> "Circuit":
+        return self._append_targets("DEPOLARIZE1", targets, p=p)
 
     @property
     def num_measurements(self) -> int:
-        return sum(op.name == "M" for op in self.operations)
+        return sum(len(op.targets) for op in self.operations if op.name in {"M", "MX"})
 
     def without_noise(self) -> "Circuit":
         out = Circuit(self.num_qubits)
@@ -103,7 +102,7 @@ class Circuit:
 
         c = stim.Circuit()
         for op in self.operations:
-            if op.name in {"H", "S", "X", "Y", "Z", "M", "R", "CX", "CY", "CZ", "SWAP"}:
+            if op.name in {"H", "S", "X", "Y", "Z", "M", "MX", "R", "CX", "CY", "CZ", "SWAP"}:
                 c.append(op.name, op.targets)
             elif op.name == "S_DAG":
                 c.append("S_DAG", op.targets)

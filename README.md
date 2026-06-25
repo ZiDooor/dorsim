@@ -7,7 +7,7 @@ The original standalone script is kept in `inverse_tableau_sim.py`. The reusable
 ```python
 from dorsim import Circuit, TableauSim, PauliFrame
 
-circuit = Circuit(2).h(0).cx(0, 1).m(0).m(1)
+circuit = Circuit(2).h([0]).cx([0, 1]).m([0, 1])
 reference = TableauSim(circuit).run().reference_measurements
 frames = PauliFrame(circuit, shots=16, seed=1).run(reference=reference)
 

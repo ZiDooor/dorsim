@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .circuit import Circuit, Operation
-from .pauli import CLIFFORD_GATES, bits_from_code, code_from_bits, local_conjugation_map
+from .pauli import SINGLE_QUBIT_GATES, TWO_QUBIT_GATES, bits_from_code, code_from_bits, local_conjugation_map
 
 
 class PauliFrame:
@@ -36,8 +36,7 @@ class PauliFrame:
         self.frame[q, :] ^= np.asarray(x, dtype=np.uint8)
         self.frame[self.n + q, :] ^= np.asarray(z, dtype=np.uint8)
 
-    def _apply_noise(self, op: Operation) -> None:
-        q = op.targets[0]
+    def _apply_noise_to_target(self, op: Operation, q: int) -> None:
         if op.name == "X_ERROR":
             m = self.rng.random(self.shots) < op.p
             self._multiply_pauli_error(q, m, 0)
@@ -53,25 +52,52 @@ class PauliFrame:
             z = (((op.p / 3 <= r) & (r < op.p))).astype(np.uint8)
             self._multiply_pauli_error(q, x, z)
 
+    def _apply_noise(self, op: Operation) -> None:
+        for q in op.targets:
+            self._apply_noise_to_target(op, q)
+
     def _measure_z(self, q: int) -> None:
         self.measurement_flips[self._measurement_index] = self.frame[q]
         self._measurement_index += 1
         self.frame[self.n + q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
 
+    def _measure_x(self, q: int) -> None:
+        self.measurement_flips[self._measurement_index] = self.frame[self.n + q]
+        self._measurement_index += 1
+        self.frame[q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
+
     def _reset_z(self, q: int) -> None:
         self.frame[q] = 0
         self.frame[self.n + q] = self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
 
+    def _iter_single_qubit_ops(self, op: Operation):
+        for q in op.targets:
+            yield Operation(op.name, (q,), op.p)
+
+    def _iter_two_qubit_ops(self, op: Operation):
+        assert len(op.targets) % 2 == 0
+        for k in range(0, len(op.targets), 2):
+            yield Operation(op.name, (op.targets[k], op.targets[k + 1]), op.p)
+
     def run(self, reference: np.ndarray | None = None) -> "PauliFrame":
         for op in self.circuit.operations:
-            if op.name in CLIFFORD_GATES:
-                self._conjugate_frame_by_gate(op)
+            if op.name in SINGLE_QUBIT_GATES:
+                for single in self._iter_single_qubit_ops(op):
+                    self._conjugate_frame_by_gate(single)
+            elif op.name in TWO_QUBIT_GATES:
+                for pair in self._iter_two_qubit_ops(op):
+                    self._conjugate_frame_by_gate(pair)
             elif op.name in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1"}:
                 self._apply_noise(op)
             elif op.name == "M":
-                self._measure_z(op.targets[0])
+                for q in op.targets:
+                    self._measure_z(q)
+            elif op.name == "MX":
+                for q in op.targets:
+                    self._measure_x(q)
             elif op.name == "R":
-                self._reset_z(op.targets[0])
+                for q in op.targets:
+                    self._reset_z(q)
         if reference is not None:
             self.samples = np.asarray(reference, dtype=np.uint8)[:, None] ^ self.measurement_flips
         return self
