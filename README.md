@@ -1,6 +1,6 @@
 # dorsim
 
-Educational Python implementation of an inverse stabilizer tableau reference simulator and a Pauli-frame sampler.
+Python implementation of an inverse stabilizer tableau reference simulator and a Pauli-frame sampler.
 
 The original standalone script is kept in `inverse_tableau_sim.py`. The reusable package lives under `src/dorsim`.
 
