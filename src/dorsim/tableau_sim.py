@@ -4,13 +4,15 @@ import numpy as np
 
 from .circuit import Circuit, Operation
 from .pauli import (
-    CLIFFORD_GATES,
+    X_CODE,
+    Y_CODE,
+    Z_CODE,
     SINGLE_QUBIT_GATES,
     TWO_QUBIT_GATES,
     code_from_bits,
     conjugate_pauli_by_gate,
     identity_tableau,
-    tableau_apply,
+    pauli_mul_phase,
 )
 
 
@@ -29,15 +31,87 @@ class TableauSim:
 
         old_tableau = self.tableau.copy()
         old_sign = self.sign.copy()
-        for row in range(2 * self.n):
-            bx = np.zeros(self.n, dtype=np.uint8)
-            bz = np.zeros(self.n, dtype=np.uint8)
-            if row < self.n:
-                bx[row] = 1
-            else:
-                bz[row - self.n] = 1
-            px, pz, ps = conjugate_pauli_by_gate(bx, bz, 0, op)
-            self.tableau[row], self.sign[row] = tableau_apply(old_tableau, old_sign, px, pz, ps)
+        if op.name == "X":
+            q = op.targets[0]
+            self.sign[self.n + q] ^= 1
+        elif op.name == "Y":
+            q = op.targets[0]
+            self.sign[q] ^= 1
+            self.sign[self.n + q] ^= 1
+        elif op.name == "Z":
+            q = op.targets[0]
+            self.sign[q] ^= 1
+        elif op.name == "H":
+            q = op.targets[0]
+            self.tableau[[q, self.n + q]] = old_tableau[[self.n + q, q]]
+            self.sign[[q, self.n + q]] = old_sign[[self.n + q, q]]
+        elif op.name == "S":
+            q = op.targets[0]
+            self._set_row_from_local_paulis(q, old_tableau, old_sign, (q,), (Y_CODE,), sign_flip=1)
+        elif op.name == "S_DAG":
+            q = op.targets[0]
+            self._set_row_from_local_paulis(q, old_tableau, old_sign, (q,), (Y_CODE,))
+        elif op.name == "SWAP":
+            a, b = op.targets
+            self.tableau[[a, b]] = old_tableau[[b, a]]
+            self.tableau[[self.n + a, self.n + b]] = old_tableau[[self.n + b, self.n + a]]
+            self.sign[[a, b]] = old_sign[[b, a]]
+            self.sign[[self.n + a, self.n + b]] = old_sign[[self.n + b, self.n + a]]
+        elif op.name == "CX":
+            a, b = op.targets
+            self._set_row_from_local_paulis(a, old_tableau, old_sign, (a, b), (X_CODE, X_CODE))
+            self._set_row_from_local_paulis(self.n + b, old_tableau, old_sign, (a, b), (Z_CODE, Z_CODE))
+        elif op.name == "CY":
+            a, b = op.targets
+            self._set_row_from_local_paulis(a, old_tableau, old_sign, (a, b), (X_CODE, Y_CODE))
+            self._set_row_from_local_paulis(b, old_tableau, old_sign, (a, b), (Z_CODE, X_CODE))
+            self._set_row_from_local_paulis(self.n + b, old_tableau, old_sign, (a, b), (Z_CODE, Z_CODE))
+        elif op.name == "CZ":
+            a, b = op.targets
+            self._set_row_from_local_paulis(a, old_tableau, old_sign, (a, b), (X_CODE, Z_CODE))
+            self._set_row_from_local_paulis(b, old_tableau, old_sign, (a, b), (Z_CODE, X_CODE))
+
+    def _set_row_from_local_paulis(
+        self,
+        row: int,
+        old_tableau: np.ndarray,
+        old_sign: np.ndarray,
+        targets: tuple[int, ...],
+        codes: tuple[int, ...],
+        sign_flip: int = 0,
+    ) -> None:
+        out_x = np.zeros(self.n, dtype=np.uint8)
+        out_z = np.zeros(self.n, dtype=np.uint8)
+        phase = (2 * int(sign_flip)) & 3
+        for q, code in zip(targets, codes):
+            if code == X_CODE:
+                out_x, out_z, phase = pauli_mul_phase(
+                    out_x, out_z, phase, old_tableau[q, : self.n], old_tableau[q, self.n :], old_sign[q]
+                )
+            elif code == Z_CODE:
+                out_x, out_z, phase = pauli_mul_phase(
+                    out_x,
+                    out_z,
+                    phase,
+                    old_tableau[self.n + q, : self.n],
+                    old_tableau[self.n + q, self.n :],
+                    old_sign[self.n + q],
+                )
+            elif code == Y_CODE:
+                phase = (phase + 1) & 3
+                out_x, out_z, phase = pauli_mul_phase(
+                    out_x, out_z, phase, old_tableau[q, : self.n], old_tableau[q, self.n :], old_sign[q]
+                )
+                out_x, out_z, phase = pauli_mul_phase(
+                    out_x,
+                    out_z,
+                    phase,
+                    old_tableau[self.n + q, : self.n],
+                    old_tableau[self.n + q, self.n :],
+                    old_sign[self.n + q],
+                )
+        self.tableau[row] = np.concatenate([out_x, out_z]).astype(np.uint8)
+        self.sign[row] = np.uint8((phase >> 1) & 1)
 
     def prepend_gate_before_circuit(self, op: Operation) -> None:
         """Physical prepend: U' = U G, so T'(P) = G^-1 T(P) G."""

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .circuit import Circuit, Operation
-from .pauli import SINGLE_QUBIT_GATES, TWO_QUBIT_GATES, bits_from_code, code_from_bits, local_conjugation_map
+from .pauli import SINGLE_QUBIT_GATES, TWO_QUBIT_GATES
 
 
 class PauliFrame:
@@ -15,22 +15,42 @@ class PauliFrame:
         self.shots = int(shots)
         self.rng = np.random.default_rng(seed)
         self.frame = np.zeros((2 * self.n, self.shots), dtype=np.uint8)
-        self.frame[self.n :, :] = self.rng.integers(0, 2, size=(self.n, self.shots), dtype=np.uint8)
+        self.frame[self.n :, :] = self.rng.integers(0, 2, size=(self.n, self.shots), dtype=np.uint8) # Initialize qubit with I/Z randomly
         self.measurement_flips = np.zeros((circuit.num_measurements, self.shots), dtype=np.uint8)
         self.samples: np.ndarray | None = None
         self._measurement_index = 0
 
     def _conjugate_frame_by_gate(self, op: Operation) -> None:
-        targets = op.targets
-        mapping = local_conjugation_map(op.name, len(targets))
-        for shot in range(self.shots):
-            local_in = tuple(
-                code_from_bits(self.frame[q, shot], self.frame[self.n + q, shot])
-                for q in targets
-            )
-            _, local_out = mapping[local_in]
-            for q, code in zip(targets, local_out):
-                self.frame[q, shot], self.frame[self.n + q, shot] = bits_from_code(code)
+        if op.name in {"X", "Y", "Z"}:
+            return
+        if op.name == "H":
+            q = op.targets[0]
+            self.frame[[q, self.n + q]] = self.frame[[self.n + q, q]]
+        elif op.name in {"S", "S_DAG"}:
+            q = op.targets[0]
+            self.frame[self.n + q] ^= self.frame[q]
+        elif op.name == "SWAP":
+            a, b = op.targets
+            self.frame[[a, b]] = self.frame[[b, a]]
+            self.frame[[self.n + a, self.n + b]] = self.frame[[self.n + b, self.n + a]]
+        elif op.name == "CX":
+            a, b = op.targets
+            self.frame[b] ^= self.frame[a]
+            self.frame[self.n + a] ^= self.frame[self.n + b]
+        elif op.name == "CZ":
+            a, b = op.targets
+            self.frame[self.n + a] ^= self.frame[b]
+            self.frame[self.n + b] ^= self.frame[a]
+        elif op.name == "CY":
+            a, b = op.targets
+            xa = self.frame[a].copy()
+            za = self.frame[self.n + a].copy()
+            xb = self.frame[b].copy()
+            zb = self.frame[self.n + b].copy()
+            self.frame[a] = xa
+            self.frame[self.n + a] = za ^ xb ^ zb
+            self.frame[b] = xb ^ xa
+            self.frame[self.n + b] = zb ^ xa
 
     def _multiply_pauli_error(self, q: int, x: np.ndarray | int, z: np.ndarray | int) -> None:
         self.frame[q, :] ^= np.asarray(x, dtype=np.uint8)

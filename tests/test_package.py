@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dorsim import Circuit, Operation, PauliFrame, TableauSim
+from dorsim.pauli import bits_from_code, code_from_bits, local_conjugation_map
 
 
 def test_flat_stim_style_operation_storage():
@@ -24,3 +25,35 @@ def test_reference_and_pauli_frame_shapes():
     assert frames.frame.shape == (4, 5)
     assert frames.measurement_flips.shape == (2, 5)
     assert frames.samples.shape == (2, 5)
+
+
+def test_direct_pauli_frame_gate_rules_match_conjugation_map():
+    for gate, arity in [
+        ("X", 1),
+        ("Y", 1),
+        ("Z", 1),
+        ("H", 1),
+        ("S", 1),
+        ("S_DAG", 1),
+        ("CX", 2),
+        ("CY", 2),
+        ("CZ", 2),
+        ("SWAP", 2),
+    ]:
+        mapping = local_conjugation_map(gate, arity)
+        for local_in, (_, expected_out) in mapping.items():
+            circuit = Circuit(arity)
+            frame = PauliFrame(circuit, shots=1, seed=1)
+            frame.frame[:] = 0
+            for q, code in enumerate(local_in):
+                x, z = bits_from_code(code)
+                frame.frame[q, 0] = x
+                frame.frame[frame.n + q, 0] = z
+
+            frame._conjugate_frame_by_gate(Operation(gate, tuple(range(arity))))
+
+            got = tuple(
+                code_from_bits(frame.frame[q, 0], frame.frame[frame.n + q, 0])
+                for q in range(arity)
+            )
+            assert got == expected_out
