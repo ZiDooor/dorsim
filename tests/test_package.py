@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from dorsim import Circuit, Operation, PauliFrame, TableauSim
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from dorsim import Circuit, Operation, PauliFrame, TableauSim, target_rec
 from dorsim.pauli import bits_from_code, code_from_bits, local_conjugation_map
 
 
@@ -25,6 +32,33 @@ def test_reference_and_pauli_frame_shapes():
     assert frames.frame.shape == (4, 5)
     assert frames.measurement_flips.shape == (2, 5)
     assert frames.samples.shape == (2, 5)
+
+
+def test_measurement_record_target_converts_to_stim():
+    circuit = Circuit(2).m([0]).cx([target_rec(-1), 1])
+
+    assert circuit.operations == [
+        Operation("M", (0,), 0.0),
+        Operation("CX", (target_rec(-1), 1), 0.0),
+    ]
+    assert str(circuit.to_stim_circuit()).strip() == "M 0\nCX rec[-1] 1"
+
+
+def test_reference_feedback_cx_and_cz():
+    x_feedback = Circuit(2).x([0]).m([0]).cx([target_rec(-1), 1]).m([1])
+    assert TableauSim(x_feedback).run().reference_measurements.tolist() == [1, 1]
+
+    z_feedback = Circuit(2).x([0]).h([1]).m([0]).cz([target_rec(-1), 1]).mx([1])
+    assert TableauSim(z_feedback).run().reference_measurements.tolist() == [1, 1]
+
+
+def test_pauli_frame_feedback_copies_measurement_sample():
+    circuit = Circuit(2).h([0]).m([0]).cx([target_rec(-1), 1]).m([1])
+
+    reference = TableauSim(circuit).run().reference_measurements
+    frames = PauliFrame(circuit, shots=64, seed=3).run(reference=reference)
+
+    assert np.array_equal(frames.samples[0], frames.samples[1])
 
 
 def test_direct_pauli_frame_gate_rules_match_conjugation_map():
@@ -57,3 +91,10 @@ def test_direct_pauli_frame_gate_rules_match_conjugation_map():
                 for q in range(arity)
             )
             assert got == expected_out
+
+
+if __name__ == "__main__":
+    for name, func in sorted(globals().items()):
+        if name.startswith("test_"):
+            func()
+    print("test_package ok")

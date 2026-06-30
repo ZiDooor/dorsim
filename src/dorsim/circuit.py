@@ -5,9 +5,27 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class RecTarget:
+    offset: int
+
+    def __repr__(self) -> str:
+        return f"target_rec({self.offset})"
+
+    def __str__(self) -> str:
+        return f"rec[{self.offset}]"
+
+
+def target_rec(offset: int) -> RecTarget:
+    return RecTarget(int(offset))
+
+
+Target = int | RecTarget
+
+
+@dataclass(frozen=True)
 class Operation:
     name: str
-    targets: tuple[int, ...]
+    targets: tuple[Target, ...]
     p: float = 0.0
 
 
@@ -18,17 +36,22 @@ class Circuit:
         self.num_qubits = int(num_qubits)
         self.operations: list[Operation] = []
 
-    def append(self, name: str, *targets: int, p: float = 0.0) -> "Circuit":
-        self.operations.append(Operation(name.upper(), tuple(map(int, targets)), float(p)))
+    def _target(self, target: Target) -> Target:
+        if isinstance(target, RecTarget):
+            return target
+        return int(target)
+
+    def append(self, name: str, *targets: Target, p: float = 0.0) -> "Circuit":
+        self.operations.append(Operation(name.upper(), tuple(self._target(t) for t in targets), float(p)))
         return self
 
-    def _targets(self, targets: Iterable[int]) -> tuple[int, ...]:
-        return tuple(map(int, targets))
+    def _targets(self, targets: Iterable[Target]) -> tuple[Target, ...]:
+        return tuple(self._target(t) for t in targets)
 
-    def _append_targets(self, name: str, targets: Iterable[int], *, p: float = 0.0) -> "Circuit":
+    def _append_targets(self, name: str, targets: Iterable[Target], *, p: float = 0.0) -> "Circuit":
         return self.append(name, *self._targets(targets), p=p)
 
-    def _append_pair_targets(self, name: str, targets: Iterable[int]) -> "Circuit":
+    def _append_pair_targets(self, name: str, targets: Iterable[Target]) -> "Circuit":
         flat = self._targets(targets)
         assert len(flat) % 2 == 0
         return self.append(name, *flat)
@@ -102,10 +125,14 @@ class Circuit:
 
         c = stim.Circuit()
         for op in self.operations:
+            targets = [
+                stim.target_rec(t.offset) if isinstance(t, RecTarget) else t
+                for t in op.targets
+            ]
             if op.name in {"H", "S", "X", "Y", "Z", "M", "MX", "R", "CX", "CY", "CZ", "SWAP"}:
-                c.append(op.name, op.targets)
+                c.append(op.name, targets)
             elif op.name == "S_DAG":
-                c.append("S_DAG", op.targets)
+                c.append("S_DAG", targets)
             elif op.name in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1"}:
-                c.append(op.name, op.targets, op.p)
+                c.append(op.name, targets, op.p)
         return c

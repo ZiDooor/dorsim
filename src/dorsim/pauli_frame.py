@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .circuit import Circuit, Operation
+from .circuit import Circuit, Operation, RecTarget
 from .pauli import SINGLE_QUBIT_GATES, TWO_QUBIT_GATES
 
 
@@ -21,6 +21,9 @@ class PauliFrame:
         self._measurement_index = 0
 
     def _conjugate_frame_by_gate(self, op: Operation) -> None:
+        if op.name in {"CX", "CZ"} and isinstance(op.targets[0], RecTarget):
+            self._apply_feedback_gate(op)
+            return
         if op.name in {"X", "Y", "Z"}:
             return
         if op.name == "H":
@@ -51,6 +54,14 @@ class PauliFrame:
             self.frame[self.n + a] = za ^ xb ^ zb
             self.frame[b] = xb ^ xa
             self.frame[self.n + b] = zb ^ xa
+
+    def _apply_feedback_gate(self, op: Operation) -> None:
+        rec, q = op.targets
+        flips = self.measurement_flips[self._measurement_index + rec.offset]
+        if op.name == "CX":
+            self._multiply_pauli_error(q, flips, 0)
+        elif op.name == "CZ":
+            self._multiply_pauli_error(q, 0, flips)
 
     def _multiply_pauli_error(self, q: int, x: np.ndarray | int, z: np.ndarray | int) -> None:
         self.frame[q, :] ^= np.asarray(x, dtype=np.uint8)

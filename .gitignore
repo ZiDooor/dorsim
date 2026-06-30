@@ -6,4 +6,3 @@ __pycache__/
 .DS_Store
 
 inverse_tableau_sim.py
-test.py

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .circuit import Circuit, Operation
+from .circuit import Circuit, Operation, RecTarget
 from .pauli import (
     X_CODE,
     Y_CODE,
@@ -28,6 +28,10 @@ class TableauSim:
 
     def append_gate_after_circuit(self, op: Operation) -> None:
         """Physical append: U' = G U, so T'(P) = T(G^-1 P G)."""
+
+        if op.name in {"CX", "CZ"} and isinstance(op.targets[0], RecTarget):
+            self._apply_feedback_gate(op)
+            return
 
         old_tableau = self.tableau.copy()
         old_sign = self.sign.copy()
@@ -70,6 +74,13 @@ class TableauSim:
             a, b = op.targets
             self._set_row_from_local_paulis(a, old_tableau, old_sign, (a, b), (X_CODE, Z_CODE))
             self._set_row_from_local_paulis(b, old_tableau, old_sign, (a, b), (Z_CODE, X_CODE))
+
+    def _apply_feedback_gate(self, op: Operation) -> None:
+        rec, q = op.targets
+        if not self.reference_measurements[self._measurement_index + rec.offset]:
+            return
+        gate = "X" if op.name == "CX" else "Z"
+        self.append_gate_after_circuit(Operation(gate, (q,)))
 
     def _set_row_from_local_paulis(
         self,
