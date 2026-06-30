@@ -146,6 +146,8 @@ class PauliFrame:
             elif op.name == "R":
                 for q in op.targets:
                     self._reset_z(q)
-        if reference is not None:
+        if reference is None:
+            self.samples = self.measurement_flips.copy()
+        else:
             self.samples = np.asarray(reference, dtype=np.uint8)[:, None] ^ self.measurement_flips
         return self

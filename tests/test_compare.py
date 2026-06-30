@@ -62,7 +62,8 @@ dorsim_circuit = (
     .m([1, 3, 5, 7])
 )
 
-reference = TableauSim(dorsim_circuit).run().reference_measurements
-frames = PauliFrame(dorsim_circuit, shots=shots).run(reference=reference)
+# reference = TableauSim(dorsim_circuit).run().reference_measurements
+# frames = PauliFrame(dorsim_circuit, shots=shots).run(reference=reference)
+frames = PauliFrame(dorsim_circuit, shots=shots).run()
 dorsim_detectors = np.bitwise_xor.reduce(frames.samples[-4:], axis=0)
 print(f"dorsim ler: {dorsim_detectors.sum()/shots}")

@@ -1,14 +1,14 @@
 # PauliFrame
 
-`PauliFrame` performs many-shot simulation by tracking Pauli corrections relative
-to the reference trajectory produced by `TableauSim`.
+`PauliFrame` performs many-shot simulation by tracking Pauli corrections and
+measurement outcome shifts. It can be used directly when you only care about
+which measurement results are flipped.
 
 ```python
-from dorsim import Circuit, TableauSim, PauliFrame
+from dorsim import Circuit, PauliFrame
 
 circuit = Circuit(1).h([0]).m([0])
-reference = TableauSim(circuit).run().reference_measurements
-frames = PauliFrame(circuit, shots=8, seed=1).run(reference=reference)
+frames = PauliFrame(circuit, shots=8, seed=1).run()
 
 print(frames.measurement_flips)
 print(frames.samples)
@@ -37,10 +37,18 @@ Columns are shots.
 (number_of_measurements, shots)
 ```
 
-Each entry says whether that shot's measurement differs from the reference
-measurement.
+Each entry is a measurement outcome shift. It says whether the Pauli frame flips
+that measurement result.
 
-If a reference is passed into `run(reference=...)`, Dorsim also stores:
+When `run()` is called without a reference, Dorsim stores:
+
+```python
+samples = measurement_flips.copy()
+```
+
+So shift-only simulation does not need `TableauSim`.
+
+When a reference is passed into `run(reference=...)`, Dorsim stores full samples:
 
 ```python
 samples = reference[:, None] ^ measurement_flips
@@ -61,8 +69,7 @@ X rows = 0
 Z rows = random 0/1
 ```
 
-This is how random measurement branches are sampled around the fixed reference
-branch.
+This is how measurement shifts are sampled around the Pauli frame.
 
 ## Clifford Updates
 
@@ -135,8 +142,7 @@ Example:
 
 ```python
 circuit = Circuit(2).x_error([0, 1], p=0.25).m([0, 1])
-reference = TableauSim(circuit).run().reference_measurements
-frames = PauliFrame(circuit, shots=1000, seed=5).run(reference=reference)
+frames = PauliFrame(circuit, shots=1000, seed=5).run()
 
 print(frames.samples.mean(axis=1))
 ```
@@ -145,8 +151,7 @@ Two-qubit depolarizing noise uses flat pairs:
 
 ```python
 circuit = Circuit(2).depolarize2([0, 1], p=0.3).m([0, 1])
-reference = TableauSim(circuit).run().reference_measurements
-frames = PauliFrame(circuit, shots=1000, seed=5).run(reference=reference)
+frames = PauliFrame(circuit, shots=1000, seed=5).run()
 
 print(frames.samples.mean(axis=1))
 ```
@@ -166,28 +171,40 @@ measurements random when appropriate.
 ## Feedback
 
 For `CX target_rec(-k), q`, the Pauli-frame simulator uses the previous
-measurement flip vector:
+measurement shift vector:
 
 ```python
-flips = measurement_flips[current_measurement_index - k]
+shift = measurement_flips[current_measurement_index - k]
 ```
 
-Then it multiplies `X(q)` into exactly the shots where `flips` is `1`.
+Then it multiplies `X(q)` into exactly the shots where `shift` is `1`.
 
 For `CZ target_rec(-k), q`, it multiplies `Z(q)` into exactly those shots.
+
+This works without reference simulation when you only care about shift
+information. A reference is needed only when you want full physical measurement
+outcomes.
 
 Example:
 
 ```python
-from dorsim import Circuit, TableauSim, PauliFrame, target_rec
+from dorsim import Circuit, PauliFrame, target_rec
 
 circuit = Circuit(2).h([0]).m([0]).cx([target_rec(-1), 1]).m([1])
-reference = TableauSim(circuit).run().reference_measurements
-frames = PauliFrame(circuit, shots=16, seed=3).run(reference=reference)
+frames = PauliFrame(circuit, shots=16, seed=3).run()
 
 print((frames.samples[0] == frames.samples[1]).all())
 # True
 ```
 
-The second measurement copies the first because the feedback applies `X` to
-qubit `1` when the first measurement is `1`.
+The second shift copies the first shift because feedback propagates the previous
+measurement shift into qubit `1`.
+
+To convert shifts into full samples, pass a reference:
+
+```python
+from dorsim import TableauSim
+
+reference = TableauSim(circuit).run().reference_measurements
+frames = PauliFrame(circuit, shots=16, seed=3).run(reference=reference)
+```

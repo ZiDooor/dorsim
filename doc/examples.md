@@ -21,12 +21,8 @@ from dorsim import Circuit, TableauSim, PauliFrame, target_rec
 ```python
 circuit = Circuit(2).h([0]).cx([0, 1]).m([0, 1])
 
-tab = TableauSim(circuit).run()
-frames = PauliFrame(circuit, shots=8, seed=1).run(
-    reference=tab.reference_measurements
-)
+frames = PauliFrame(circuit, shots=8, seed=1).run()
 
-print("reference:", tab.reference_measurements)
 print("flips shape:", frames.measurement_flips.shape)
 print("samples shape:", frames.samples.shape)
 print("equal results:", (frames.samples[0] == frames.samples[1]).all())
@@ -39,6 +35,28 @@ flips shape: (2, 8)
 samples shape: (2, 8)
 equal results: True
 ```
+
+## Shift-Only PauliFrame Simulation
+
+```python
+circuit = Circuit(2).h([0]).m([0]).cx([target_rec(-1), 1]).m([1])
+
+frames = PauliFrame(circuit, shots=8, seed=1).run()
+
+print("measurement shifts:")
+print(frames.measurement_flips)
+print("samples:")
+print(frames.samples)
+```
+
+When no reference is provided:
+
+```text
+samples == measurement_flips
+```
+
+This is enough for detector flips, logical flips, and other shift-only
+calculations.
 
 ## Z And X Measurements
 
@@ -61,10 +79,9 @@ deterministic `0`.
 ```python
 circuit = Circuit(2).x_error([0, 1], p=0.25).m([0, 1])
 
-reference = TableauSim(circuit).run().reference_measurements
-frames = PauliFrame(circuit, shots=2000, seed=9).run(reference=reference)
+frames = PauliFrame(circuit, shots=2000, seed=9).run()
 
-print("sample means:", frames.samples.mean(axis=1))
+print("shift means:", frames.samples.mean(axis=1))
 ```
 
 The two sample means should be close to `0.25`.
@@ -74,10 +91,9 @@ Two-qubit depolarizing noise uses flat pairs:
 ```python
 circuit = Circuit(2).depolarize2([0, 1], p=0.3).m([0, 1])
 
-reference = TableauSim(circuit).run().reference_measurements
-frames = PauliFrame(circuit, shots=2000, seed=9).run(reference=reference)
+frames = PauliFrame(circuit, shots=2000, seed=9).run()
 
-print("sample means:", frames.samples.mean(axis=1))
+print("shift means:", frames.samples.mean(axis=1))
 print(circuit.to_stim_circuit())
 ```
 
@@ -114,17 +130,22 @@ circuit = (
     .m([1])
 )
 
-reference = TableauSim(circuit).run().reference_measurements
-frames = PauliFrame(circuit, shots=16, seed=3).run(reference=reference)
+frames = PauliFrame(circuit, shots=16, seed=3).run()
 
-print("reference:", reference)
-print("samples:")
+print("shifts:")
 print(frames.samples)
 print("copied:", (frames.samples[0] == frames.samples[1]).all())
 ```
 
-`CX target_rec(-1), 1` conditionally applies `X` to qubit `1` using the previous
-measurement result, so measurement `1` copies measurement `0`.
+`CX target_rec(-1), 1` uses the previous measurement shift. The second shift
+copies the first shift, so this works without reference simulation.
+
+If you need full measurement samples instead of shifts:
+
+```python
+reference = TableauSim(circuit).run().reference_measurements
+frames = PauliFrame(circuit, shots=16, seed=3).run(reference=reference)
+```
 
 ## Compare Dorsim And Stim Circuit Construction
 

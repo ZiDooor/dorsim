@@ -7,10 +7,9 @@ The package has two simulator layers:
 
 1. `TableauSim` builds one reference trajectory using an inverse stabilizer
    tableau.
-2. `PauliFrame` runs many shots by tracking Pauli-frame differences from that
-   reference trajectory.
+2. `PauliFrame` runs many shots by tracking Pauli-frame measurement shifts.
 
-The usual workflow is:
+For shift-only simulation, use `PauliFrame` directly:
 
 ```python
 import sys
@@ -22,19 +21,29 @@ from dorsim import Circuit, TableauSim, PauliFrame
 
 circuit = Circuit(2).h([0]).cx([0, 1]).m([0, 1])
 
-tab = TableauSim(circuit).run()
-frames = PauliFrame(circuit, shots=16, seed=1).run(
-    reference=tab.reference_measurements
-)
+frames = PauliFrame(circuit, shots=16, seed=1).run()
 
-print(tab.reference_measurements)
 print(frames.measurement_flips.shape)
 print(frames.samples.shape)
 ```
 
-`TableauSim` ignores Pauli noise and produces `reference_measurements`.
-`PauliFrame` includes Pauli noise and produces shot-by-shot flips. When a
-reference is provided, it also produces samples:
+Without a reference:
+
+```text
+samples = measurement_flips
+```
+
+If you need full physical samples relative to a reference trajectory, run
+`TableauSim` first:
+
+```python
+tab = TableauSim(circuit).run()
+frames = PauliFrame(circuit, shots=16, seed=1).run(
+    reference=tab.reference_measurements
+)
+```
+
+With a reference:
 
 ```text
 samples = reference[:, None] ^ measurement_flips
