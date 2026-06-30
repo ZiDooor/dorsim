@@ -15,6 +15,11 @@ def test_flat_stim_style_operation_storage():
     circuit = Circuit(4).cx([0, 1, 2, 3])
     assert circuit.operations == [Operation("CX", (0, 1, 2, 3), 0.0)]
 
+    noise = Circuit(2).depolarize2([0, 1], 0.25)
+    assert noise.operations == [Operation("DEPOLARIZE2", (0, 1), 0.25)]
+    assert str(noise.to_stim_circuit()).strip() == "DEPOLARIZE2(0.25) 0 1"
+    assert noise.without_noise().operations == []
+
     measured = Circuit(3).m([0, 1]).mx([2])
     assert measured.operations == [Operation("M", (0, 1), 0.0), Operation("MX", (2,), 0.0)]
     assert measured.num_measurements == 3
@@ -59,6 +64,59 @@ def test_pauli_frame_feedback_copies_measurement_sample():
     frames = PauliFrame(circuit, shots=64, seed=3).run(reference=reference)
 
     assert np.array_equal(frames.samples[0], frames.samples[1])
+
+
+def test_depolarize2_samples_all_non_identity_pair_errors():
+    class FakeRng:
+        def random(self, size):
+            return np.zeros(size)
+
+        def integers(self, low, high=None, size=None, dtype=None):
+            values = np.arange(size) % high
+            if dtype is not None:
+                values = values.astype(dtype)
+            return values
+
+    frame = PauliFrame(Circuit(2), shots=15, seed=1)
+    frame.frame[:] = 0
+    frame.rng = FakeRng()
+    frame._apply_depolarize2_to_pair(Operation("DEPOLARIZE2", (0, 1), 1.0), 0, 1)
+
+    observed = {
+        (
+            code_from_bits(frame.frame[0, shot], frame.frame[2, shot]),
+            code_from_bits(frame.frame[1, shot], frame.frame[3, shot]),
+        )
+        for shot in range(frame.shots)
+    }
+    expected = {
+        (0, 1),
+        (0, 3),
+        (0, 2),
+        (1, 0),
+        (1, 1),
+        (1, 3),
+        (1, 2),
+        (3, 0),
+        (3, 1),
+        (3, 3),
+        (3, 2),
+        (2, 0),
+        (2, 1),
+        (2, 3),
+        (2, 2),
+    }
+    assert observed == expected
+
+
+def test_depolarize2_sampling_distribution_matches_stim():
+    circuit = Circuit(2).depolarize2([0, 1], p=0.3).m([0, 1])
+    reference = TableauSim(circuit).run().reference_measurements
+    ours = PauliFrame(circuit, shots=20000, seed=11).run(reference=reference).samples
+
+    stim_samples = circuit.to_stim_circuit().compile_sampler(seed=11).sample(shots=20000).T
+
+    assert np.all(np.abs(ours.mean(axis=1) - stim_samples.mean(axis=1)) < 0.03)
 
 
 def test_direct_pauli_frame_gate_rules_match_conjugation_map():

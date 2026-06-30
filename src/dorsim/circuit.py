@@ -51,10 +51,10 @@ class Circuit:
     def _append_targets(self, name: str, targets: Iterable[Target], *, p: float = 0.0) -> "Circuit":
         return self.append(name, *self._targets(targets), p=p)
 
-    def _append_pair_targets(self, name: str, targets: Iterable[Target]) -> "Circuit":
+    def _append_pair_targets(self, name: str, targets: Iterable[Target], *, p: float = 0.0) -> "Circuit":
         flat = self._targets(targets)
         assert len(flat) % 2 == 0
-        return self.append(name, *flat)
+        return self.append(name, *flat, p=p)
 
     def h(self, targets: Iterable[int]) -> "Circuit":
         return self._append_targets("H", targets)
@@ -107,6 +107,9 @@ class Circuit:
     def depolarize1(self, targets: Iterable[int], p: float) -> "Circuit":
         return self._append_targets("DEPOLARIZE1", targets, p=p)
 
+    def depolarize2(self, targets: Iterable[int], p: float) -> "Circuit":
+        return self._append_pair_targets("DEPOLARIZE2", targets, p=p)
+
     @property
     def num_measurements(self) -> int:
         return sum(len(op.targets) for op in self.operations if op.name in {"M", "MX"})
@@ -116,7 +119,7 @@ class Circuit:
         out.operations = [
             op
             for op in self.operations
-            if op.name not in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1"}
+            if op.name not in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1", "DEPOLARIZE2"}
         ]
         return out
 
@@ -133,6 +136,6 @@ class Circuit:
                 c.append(op.name, targets)
             elif op.name == "S_DAG":
                 c.append("S_DAG", targets)
-            elif op.name in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1"}:
+            elif op.name in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1", "DEPOLARIZE2"}:
                 c.append(op.name, targets, op.p)
         return c

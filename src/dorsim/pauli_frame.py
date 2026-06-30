@@ -83,7 +83,24 @@ class PauliFrame:
             z = (((op.p / 3 <= r) & (r < op.p))).astype(np.uint8)
             self._multiply_pauli_error(q, x, z)
 
+    def _apply_depolarize2_to_pair(self, op: Operation, a: int, b: int) -> None:
+        # Order: IX IY IZ XI XX XY XZ YI YX YY YZ ZI ZX ZY ZZ.
+        codes_a = np.array([0, 0, 0, 1, 1, 1, 1, 3, 3, 3, 3, 2, 2, 2, 2], dtype=np.uint8)
+        codes_b = np.array([1, 3, 2, 0, 1, 3, 2, 0, 1, 3, 2, 0, 1, 3, 2], dtype=np.uint8)
+        mask = (self.rng.random(self.shots) < op.p).astype(np.uint8)
+        choices = self.rng.integers(0, 15, size=self.shots)
+        pa = codes_a[choices]
+        pb = codes_b[choices]
+
+        self._multiply_pauli_error(a, (pa & 1) * mask, ((pa >> 1) & 1) * mask)
+        self._multiply_pauli_error(b, (pb & 1) * mask, ((pb >> 1) & 1) * mask)
+
     def _apply_noise(self, op: Operation) -> None:
+        if op.name == "DEPOLARIZE2":
+            assert len(op.targets) % 2 == 0
+            for k in range(0, len(op.targets), 2):
+                self._apply_depolarize2_to_pair(op, op.targets[k], op.targets[k + 1])
+            return
         for q in op.targets:
             self._apply_noise_to_target(op, q)
 
@@ -118,7 +135,7 @@ class PauliFrame:
             elif op.name in TWO_QUBIT_GATES:
                 for pair in self._iter_two_qubit_ops(op):
                     self._conjugate_frame_by_gate(pair)
-            elif op.name in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1"}:
+            elif op.name in {"X_ERROR", "Y_ERROR", "Z_ERROR", "DEPOLARIZE1", "DEPOLARIZE2"}:
                 self._apply_noise(op)
             elif op.name == "M":
                 for q in op.targets:

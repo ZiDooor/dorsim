@@ -20,3 +20,5 @@ Run the package demo:
 ```bash
 python -m dorsim
 ```
+
+More user and simulator documentation is in [`doc/index.md`](doc/index.md).
