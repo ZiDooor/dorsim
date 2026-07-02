@@ -19,17 +19,17 @@ print(frames.samples)
 For `n` qubits and `shots` shots:
 
 ```text
-frame shape = (2n, shots)
+frame shape = (shots, 2n)
 ```
 
-Rows are binary Pauli-frame bits:
+Rows are shots. Columns are binary Pauli-frame bits:
 
 ```text
-row 0      ... n-1   = X bits
-row n      ... 2n-1  = Z bits
+column 0      ... n-1   = X bits
+column n      ... 2n-1  = Z bits
 ```
 
-Columns are shots.
+So `frame[a][b]` means the `b`-th Pauli-frame bit in the `a`-th shot.
 
 `measurement_flips` has shape:
 
@@ -65,8 +65,8 @@ So `samples` has shape:
 The frame starts with random `I` or `Z` on each qubit in each shot:
 
 ```text
-X rows = 0
-Z rows = random 0/1
+X columns = 0
+Z columns = random 0/1
 ```
 
 This is how measurement shifts are sampled around the Pauli frame.

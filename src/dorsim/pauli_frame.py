@@ -7,15 +7,15 @@ from .pauli import SINGLE_QUBIT_GATES, TWO_QUBIT_GATES
 
 
 class PauliFrame:
-    """Many-shot Pauli-frame propagation using a (2n, shots) uint8 matrix."""
+    """Many-shot Pauli-frame propagation using a (shots, 2n) uint8 matrix."""
 
     def __init__(self, circuit: Circuit, shots: int, seed: int | None = None):
         self.circuit = circuit
         self.n = circuit.num_qubits
         self.shots = int(shots)
         self.rng = np.random.default_rng(seed)
-        self.frame = np.zeros((2 * self.n, self.shots), dtype=np.uint8)
-        self.frame[self.n :, :] = self.rng.integers(0, 2, size=(self.n, self.shots), dtype=np.uint8) # Initialize qubit with I/Z randomly
+        self.frame = np.zeros((self.shots, 2 * self.n), dtype=np.uint8)
+        self.frame[:, self.n :] = self.rng.integers(0, 2, size=(self.shots, self.n), dtype=np.uint8)
         self.measurement_flips = np.zeros((circuit.num_measurements, self.shots), dtype=np.uint8)
         self.samples: np.ndarray | None = None
         self._measurement_index = 0
@@ -28,32 +28,32 @@ class PauliFrame:
             return
         if op.name == "H":
             q = op.targets[0]
-            self.frame[[q, self.n + q]] = self.frame[[self.n + q, q]]
+            self.frame[:, [q, self.n + q]] = self.frame[:, [self.n + q, q]]
         elif op.name in {"S", "S_DAG"}:
             q = op.targets[0]
-            self.frame[self.n + q] ^= self.frame[q]
+            self.frame[:, self.n + q] ^= self.frame[:, q]
         elif op.name == "SWAP":
             a, b = op.targets
-            self.frame[[a, b]] = self.frame[[b, a]]
-            self.frame[[self.n + a, self.n + b]] = self.frame[[self.n + b, self.n + a]]
+            self.frame[:, [a, b]] = self.frame[:, [b, a]]
+            self.frame[:, [self.n + a, self.n + b]] = self.frame[:, [self.n + b, self.n + a]]
         elif op.name == "CX":
             a, b = op.targets
-            self.frame[b] ^= self.frame[a]
-            self.frame[self.n + a] ^= self.frame[self.n + b]
+            self.frame[:, b] ^= self.frame[:, a]
+            self.frame[:, self.n + a] ^= self.frame[:, self.n + b]
         elif op.name == "CZ":
             a, b = op.targets
-            self.frame[self.n + a] ^= self.frame[b]
-            self.frame[self.n + b] ^= self.frame[a]
+            self.frame[:, self.n + a] ^= self.frame[:, b]
+            self.frame[:, self.n + b] ^= self.frame[:, a]
         elif op.name == "CY":
             a, b = op.targets
-            xa = self.frame[a].copy()
-            za = self.frame[self.n + a].copy()
-            xb = self.frame[b].copy()
-            zb = self.frame[self.n + b].copy()
-            self.frame[a] = xa
-            self.frame[self.n + a] = za ^ xb ^ zb
-            self.frame[b] = xb ^ xa
-            self.frame[self.n + b] = zb ^ xa
+            xa = self.frame[:, a].copy()
+            za = self.frame[:, self.n + a].copy()
+            xb = self.frame[:, b].copy()
+            zb = self.frame[:, self.n + b].copy()
+            self.frame[:, a] = xa
+            self.frame[:, self.n + a] = za ^ xb ^ zb
+            self.frame[:, b] = xb ^ xa
+            self.frame[:, self.n + b] = zb ^ xa
 
     def _apply_feedback_gate(self, op: Operation) -> None:
         rec, q = op.targets
@@ -64,8 +64,8 @@ class PauliFrame:
             self._multiply_pauli_error(q, 0, flips)
 
     def _multiply_pauli_error(self, q: int, x: np.ndarray | int, z: np.ndarray | int) -> None:
-        self.frame[q, :] ^= np.asarray(x, dtype=np.uint8)
-        self.frame[self.n + q, :] ^= np.asarray(z, dtype=np.uint8)
+        self.frame[:, q] ^= np.asarray(x, dtype=np.uint8)
+        self.frame[:, self.n + q] ^= np.asarray(z, dtype=np.uint8)
 
     def _apply_noise_to_target(self, op: Operation, q: int) -> None:
         if op.name == "X_ERROR":
@@ -105,18 +105,18 @@ class PauliFrame:
             self._apply_noise_to_target(op, q)
 
     def _measure_z(self, q: int) -> None:
-        self.measurement_flips[self._measurement_index] = self.frame[q]
+        self.measurement_flips[self._measurement_index] = self.frame[:, q]
         self._measurement_index += 1
-        self.frame[self.n + q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
+        self.frame[:, self.n + q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
 
     def _measure_x(self, q: int) -> None:
-        self.measurement_flips[self._measurement_index] = self.frame[self.n + q]
+        self.measurement_flips[self._measurement_index] = self.frame[:, self.n + q]
         self._measurement_index += 1
-        self.frame[q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
+        self.frame[:, q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
 
     def _reset_z(self, q: int) -> None:
-        self.frame[q] = 0
-        self.frame[self.n + q] = self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
+        self.frame[:, q] = 0
+        self.frame[:, self.n + q] = self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
 
     def _iter_single_qubit_ops(self, op: Operation):
         for q in op.targets:

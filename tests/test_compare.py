@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dorsim import Circuit, PauliFrame, TableauSim, target_rec
 
-shots = 100000
+shots = 2
 err = 0.01
 ### test ler of level-1 C4/C6 code
 ## stim version
@@ -65,5 +65,6 @@ dorsim_circuit = (
 # reference = TableauSim(dorsim_circuit).run().reference_measurements
 # frames = PauliFrame(dorsim_circuit, shots=shots).run(reference=reference)
 frames = PauliFrame(dorsim_circuit, shots=shots).run()
+# print(f"dorsim pauliframe samples:\n{frames.frame}")
 dorsim_detectors = np.bitwise_xor.reduce(frames.samples[-4:], axis=0)
 print(f"dorsim ler: {dorsim_detectors.sum()/shots}")

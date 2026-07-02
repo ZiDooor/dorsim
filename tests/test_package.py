@@ -34,7 +34,7 @@ def test_reference_and_pauli_frame_shapes():
     assert tab.reference_measurements.shape == (2,)
 
     frames = PauliFrame(circuit, shots=5, seed=1).run(reference=tab.reference_measurements)
-    assert frames.frame.shape == (4, 5)
+    assert frames.frame.shape == (5, 4)
     assert frames.measurement_flips.shape == (2, 5)
     assert frames.samples.shape == (2, 5)
 
@@ -84,8 +84,8 @@ def test_depolarize2_samples_all_non_identity_pair_errors():
 
     observed = {
         (
-            code_from_bits(frame.frame[0, shot], frame.frame[2, shot]),
-            code_from_bits(frame.frame[1, shot], frame.frame[3, shot]),
+            code_from_bits(frame.frame[shot, 0], frame.frame[shot, 2]),
+            code_from_bits(frame.frame[shot, 1], frame.frame[shot, 3]),
         )
         for shot in range(frame.shots)
     }
@@ -139,13 +139,13 @@ def test_direct_pauli_frame_gate_rules_match_conjugation_map():
             frame.frame[:] = 0
             for q, code in enumerate(local_in):
                 x, z = bits_from_code(code)
-                frame.frame[q, 0] = x
-                frame.frame[frame.n + q, 0] = z
+                frame.frame[0, q] = x
+                frame.frame[0, frame.n + q] = z
 
             frame._conjugate_frame_by_gate(Operation(gate, tuple(range(arity))))
 
             got = tuple(
-                code_from_bits(frame.frame[q, 0], frame.frame[frame.n + q, 0])
+                code_from_bits(frame.frame[0, q], frame.frame[0, frame.n + q])
                 for q in range(arity)
             )
             assert got == expected_out
