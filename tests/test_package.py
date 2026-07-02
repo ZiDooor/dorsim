@@ -35,8 +35,8 @@ def test_reference_and_pauli_frame_shapes():
 
     frames = PauliFrame(circuit, shots=5, seed=1).run(reference=tab.reference_measurements)
     assert frames.frame.shape == (5, 4)
-    assert frames.measurement_flips.shape == (2, 5)
-    assert frames.samples.shape == (2, 5)
+    assert frames.measurement_flips.shape == (5, 2)
+    assert frames.samples.shape == (5, 2)
 
 
 def test_measurement_record_target_converts_to_stim():
@@ -63,7 +63,33 @@ def test_pauli_frame_feedback_copies_measurement_sample():
     reference = TableauSim(circuit).run().reference_measurements
     frames = PauliFrame(circuit, shots=64, seed=3).run(reference=reference)
 
-    assert np.array_equal(frames.samples[0], frames.samples[1])
+    assert np.array_equal(frames.samples[:, 0], frames.samples[:, 1])
+
+
+def test_pauli_frame_update_resets_outputs_and_optionally_replaces_frame():
+    frame = PauliFrame(Circuit(2).m([0, 1]), shots=3, seed=1)
+    old_frame = frame.frame.copy()
+    frame.measurement_flips[:] = 1
+    frame.samples = np.ones_like(frame.measurement_flips)
+    frame._measurement_index = 2
+
+    assert frame.update() is frame
+    assert np.array_equal(frame.frame, old_frame)
+    assert np.array_equal(frame.measurement_flips, np.zeros((3, 2), dtype=np.uint8))
+    assert frame.samples is None
+    assert frame._measurement_index == 0
+
+    new_frame = np.ones((3, 4), dtype=np.uint8)
+    frame.measurement_flips[:] = 1
+    frame.samples = np.ones_like(frame.measurement_flips)
+    frame._measurement_index = 2
+    frame.update(new_frame)
+
+    assert np.array_equal(frame.frame, new_frame)
+    assert frame.frame is not new_frame
+    assert np.array_equal(frame.measurement_flips, np.zeros((3, 2), dtype=np.uint8))
+    assert frame.samples is None
+    assert frame._measurement_index == 0
 
 
 def test_depolarize2_samples_all_non_identity_pair_errors():
@@ -114,9 +140,9 @@ def test_depolarize2_sampling_distribution_matches_stim():
     reference = TableauSim(circuit).run().reference_measurements
     ours = PauliFrame(circuit, shots=20000, seed=11).run(reference=reference).samples
 
-    stim_samples = circuit.to_stim_circuit().compile_sampler(seed=11).sample(shots=20000).T
+    stim_samples = circuit.to_stim_circuit().compile_sampler(seed=11).sample(shots=20000)
 
-    assert np.all(np.abs(ours.mean(axis=1) - stim_samples.mean(axis=1)) < 0.03)
+    assert np.all(np.abs(ours.mean(axis=0) - stim_samples.mean(axis=0)) < 0.03)
 
 
 def test_direct_pauli_frame_gate_rules_match_conjugation_map():

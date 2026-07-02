@@ -66,5 +66,5 @@ dorsim_circuit = (
 # frames = PauliFrame(dorsim_circuit, shots=shots).run(reference=reference)
 frames = PauliFrame(dorsim_circuit, shots=shots).run()
 # print(f"dorsim pauliframe samples:\n{frames.frame}")
-dorsim_detectors = np.bitwise_xor.reduce(frames.samples[-4:], axis=0)
+dorsim_detectors = np.bitwise_xor.reduce(frames.samples[:, -4:], axis=1)
 print(f"dorsim ler: {dorsim_detectors.sum()/shots}")

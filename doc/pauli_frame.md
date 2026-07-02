@@ -34,11 +34,12 @@ So `frame[a][b]` means the `b`-th Pauli-frame bit in the `a`-th shot.
 `measurement_flips` has shape:
 
 ```text
-(number_of_measurements, shots)
+(shots, number_of_measurements)
 ```
 
 Each entry is a measurement outcome shift. It says whether the Pauli frame flips
-that measurement result.
+that measurement result. `measurement_flips[a][b]` means measurement `b`'s
+shift in shot `a`.
 
 When `run()` is called without a reference, Dorsim stores:
 
@@ -51,13 +52,46 @@ So shift-only simulation does not need `TableauSim`.
 When a reference is passed into `run(reference=...)`, Dorsim stores full samples:
 
 ```python
-samples = reference[:, None] ^ measurement_flips
+samples = measurement_flips ^ reference[None, :]
 ```
 
 So `samples` has shape:
 
 ```text
-(number_of_measurements, shots)
+(shots, number_of_measurements)
+```
+
+`samples[a][b]` means measurement `b`'s sample in shot `a`.
+
+## Updating State
+
+`update()` resets measurement-output bookkeeping for manual or mid-simulation
+use:
+
+```python
+pf.update()
+```
+
+This resets:
+
+```text
+measurement_flips
+samples
+_measurement_index
+```
+
+and keeps the current `frame` unchanged.
+
+You can also replace the frame:
+
+```python
+pf.update(custom_frame)
+```
+
+The custom frame must have shape:
+
+```text
+(shots, 2n)
 ```
 
 ## Initialization
@@ -100,7 +134,7 @@ M q
 the flip bit is the current X component on qubit `q`:
 
 ```python
-measurement_flips[i] = frame[q]
+measurement_flips[:, i] = frame[:, q]
 ```
 
 Then Dorsim randomizes the Z component on that qubit.
@@ -114,7 +148,7 @@ MX q
 the flip bit is the current Z component on qubit `q`:
 
 ```python
-measurement_flips[i] = frame[n + q]
+measurement_flips[:, i] = frame[:, n + q]
 ```
 
 Then Dorsim randomizes the X component on that qubit.
@@ -144,7 +178,7 @@ Example:
 circuit = Circuit(2).x_error([0, 1], p=0.25).m([0, 1])
 frames = PauliFrame(circuit, shots=1000, seed=5).run()
 
-print(frames.samples.mean(axis=1))
+print(frames.samples.mean(axis=0))
 ```
 
 Two-qubit depolarizing noise uses flat pairs:
@@ -153,7 +187,7 @@ Two-qubit depolarizing noise uses flat pairs:
 circuit = Circuit(2).depolarize2([0, 1], p=0.3).m([0, 1])
 frames = PauliFrame(circuit, shots=1000, seed=5).run()
 
-print(frames.samples.mean(axis=1))
+print(frames.samples.mean(axis=0))
 ```
 
 ## Reset
@@ -174,7 +208,7 @@ For `CX target_rec(-k), q`, the Pauli-frame simulator uses the previous
 measurement shift vector:
 
 ```python
-shift = measurement_flips[current_measurement_index - k]
+shift = measurement_flips[:, current_measurement_index - k]
 ```
 
 Then it multiplies `X(q)` into exactly the shots where `shift` is `1`.
@@ -193,7 +227,7 @@ from dorsim import Circuit, PauliFrame, target_rec
 circuit = Circuit(2).h([0]).m([0]).cx([target_rec(-1), 1]).m([1])
 frames = PauliFrame(circuit, shots=16, seed=3).run()
 
-print((frames.samples[0] == frames.samples[1]).all())
+print((frames.samples[:, 0] == frames.samples[:, 1]).all())
 # True
 ```
 

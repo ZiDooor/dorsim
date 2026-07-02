@@ -16,9 +16,19 @@ class PauliFrame:
         self.rng = np.random.default_rng(seed)
         self.frame = np.zeros((self.shots, 2 * self.n), dtype=np.uint8)
         self.frame[:, self.n :] = self.rng.integers(0, 2, size=(self.shots, self.n), dtype=np.uint8)
-        self.measurement_flips = np.zeros((circuit.num_measurements, self.shots), dtype=np.uint8)
+        self.measurement_flips = np.zeros((self.shots, circuit.num_measurements), dtype=np.uint8)
         self.samples: np.ndarray | None = None
         self._measurement_index = 0
+
+    def update(self, frame: np.ndarray | None = None) -> "PauliFrame":
+        self.measurement_flips = np.zeros((self.shots, self.circuit.num_measurements), dtype=np.uint8)
+        self.samples = None
+        self._measurement_index = 0
+        if frame is not None:
+            self.frame = np.asarray(frame, dtype=np.uint8).copy()
+            self.shots = self.frame.shape[0]
+            assert self.frame.shape == (self.shots, 2 * self.n)
+        return self
 
     def _conjugate_frame_by_gate(self, op: Operation) -> None:
         if op.name in {"CX", "CZ"} and isinstance(op.targets[0], RecTarget):
@@ -57,7 +67,7 @@ class PauliFrame:
 
     def _apply_feedback_gate(self, op: Operation) -> None:
         rec, q = op.targets
-        flips = self.measurement_flips[self._measurement_index + rec.offset]
+        flips = self.measurement_flips[:, self._measurement_index + rec.offset]
         if op.name == "CX":
             self._multiply_pauli_error(q, flips, 0)
         elif op.name == "CZ":
@@ -105,12 +115,12 @@ class PauliFrame:
             self._apply_noise_to_target(op, q)
 
     def _measure_z(self, q: int) -> None:
-        self.measurement_flips[self._measurement_index] = self.frame[:, q]
+        self.measurement_flips[:, self._measurement_index] = self.frame[:, q]
         self._measurement_index += 1
         self.frame[:, self.n + q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
 
     def _measure_x(self, q: int) -> None:
-        self.measurement_flips[self._measurement_index] = self.frame[:, self.n + q]
+        self.measurement_flips[:, self._measurement_index] = self.frame[:, self.n + q]
         self._measurement_index += 1
         self.frame[:, q] ^= self.rng.integers(0, 2, size=self.shots, dtype=np.uint8)
 
@@ -149,5 +159,5 @@ class PauliFrame:
         if reference is None:
             self.samples = self.measurement_flips.copy()
         else:
-            self.samples = np.asarray(reference, dtype=np.uint8)[:, None] ^ self.measurement_flips
+            self.samples = self.measurement_flips ^ np.asarray(reference, dtype=np.uint8)[None, :]
         return self

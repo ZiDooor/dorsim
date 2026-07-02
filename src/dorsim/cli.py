@@ -95,14 +95,14 @@ def run_self_checks() -> None:
     pf_circuit = Circuit(1).h([0]).m([0])
     ref = TableauSim(pf_circuit).run().reference_measurements
     pf = PauliFrame(pf_circuit, shots=5000, seed=5).run(reference=ref)
-    mean = float(pf.samples[0].mean())
+    mean = float(pf.samples[:, 0].mean())
     assert 0.45 < mean < 0.55
 
     noisy = Circuit(2).x_error([0, 1], 0.25).m([0, 1])
     noisy_ref = TableauSim(noisy).run().reference_measurements
     ours = PauliFrame(noisy, shots=20000, seed=9).run(reference=noisy_ref).samples
-    stim_samples = noisy.to_stim_circuit().compile_sampler(seed=9).sample(shots=20000).T
-    assert np.all(np.abs(ours.mean(axis=1) - stim_samples.mean(axis=1)) < 0.03)
+    stim_samples = noisy.to_stim_circuit().compile_sampler(seed=9).sample(shots=20000)
+    assert np.all(np.abs(ours.mean(axis=0) - stim_samples.mean(axis=0)) < 0.03)
 
 
 def demo() -> None:

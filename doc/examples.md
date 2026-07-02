@@ -25,14 +25,14 @@ frames = PauliFrame(circuit, shots=8, seed=1).run()
 
 print("flips shape:", frames.measurement_flips.shape)
 print("samples shape:", frames.samples.shape)
-print("equal results:", (frames.samples[0] == frames.samples[1]).all())
+print("equal results:", (frames.samples[:, 0] == frames.samples[:, 1]).all())
 ```
 
 Expected shapes:
 
 ```text
 flips shape: (2, 8)
-samples shape: (2, 8)
+samples shape: (8, 2)
 equal results: True
 ```
 
@@ -81,7 +81,7 @@ circuit = Circuit(2).x_error([0, 1], p=0.25).m([0, 1])
 
 frames = PauliFrame(circuit, shots=2000, seed=9).run()
 
-print("shift means:", frames.samples.mean(axis=1))
+print("shift means:", frames.samples.mean(axis=0))
 ```
 
 The two sample means should be close to `0.25`.
@@ -93,7 +93,7 @@ circuit = Circuit(2).depolarize2([0, 1], p=0.3).m([0, 1])
 
 frames = PauliFrame(circuit, shots=2000, seed=9).run()
 
-print("shift means:", frames.samples.mean(axis=1))
+print("shift means:", frames.samples.mean(axis=0))
 print(circuit.to_stim_circuit())
 ```
 
@@ -134,7 +134,7 @@ frames = PauliFrame(circuit, shots=16, seed=3).run()
 
 print("shifts:")
 print(frames.samples)
-print("copied:", (frames.samples[0] == frames.samples[1]).all())
+print("copied:", (frames.samples[:, 0] == frames.samples[:, 1]).all())
 ```
 
 `CX target_rec(-1), 1` uses the previous measurement shift. The second shift

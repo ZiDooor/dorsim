@@ -46,7 +46,7 @@ frames = PauliFrame(circuit, shots=16, seed=1).run(
 With a reference:
 
 ```text
-samples = reference[:, None] ^ measurement_flips
+samples = measurement_flips ^ reference[None, :]
 ```
 
 ## Documents
