@@ -79,6 +79,29 @@ def test_pauli_frame_update_resets_outputs_and_optionally_replaces_frame():
     assert frame.samples is None
     assert frame._measurement_index == 0
 
+    new_circuit = Circuit(2).m([0])
+    old_frame = frame.frame.copy()
+    frame.measurement_flips[:] = 1
+    frame.samples = np.ones_like(frame.measurement_flips)
+    frame._measurement_index = 2
+    frame.update(circuit=new_circuit)
+
+    assert frame.circuit is new_circuit
+    assert np.array_equal(frame.frame, old_frame)
+    assert np.array_equal(frame.measurement_flips, np.zeros((3, 1), dtype=np.uint8))
+    assert frame.samples is None
+    assert frame._measurement_index == 0
+
+    newer_circuit = Circuit(2).m([0, 1])
+    newer_frame = np.zeros((4, 4), dtype=np.uint8)
+    frame.update(newer_frame, circuit=newer_circuit)
+
+    assert frame.circuit is newer_circuit
+    assert frame.shots == 4
+    assert np.array_equal(frame.frame, newer_frame)
+    assert frame.frame is not newer_frame
+    assert np.array_equal(frame.measurement_flips, np.zeros((4, 2), dtype=np.uint8))
+
     new_frame = np.ones((3, 4), dtype=np.uint8)
     frame.measurement_flips[:] = 1
     frame.samples = np.ones_like(frame.measurement_flips)
@@ -90,6 +113,36 @@ def test_pauli_frame_update_resets_outputs_and_optionally_replaces_frame():
     assert np.array_equal(frame.measurement_flips, np.zeros((3, 2), dtype=np.uint8))
     assert frame.samples is None
     assert frame._measurement_index == 0
+
+
+def test_pauli_frame_update_to_second_circuit_continues_from_current_frame():
+    first = Circuit(2).x_error([0], p=1)
+    second = Circuit(2).x_error([1], p=1)
+
+    frame = PauliFrame(first, shots=5, seed=1).run()
+    after_first = frame.frame.copy()
+
+    frame.update(circuit=second)
+
+    assert frame.circuit is second
+    assert np.array_equal(frame.frame, after_first)
+    assert frame.measurement_flips.shape == (5, 0)
+    assert frame.samples is None
+
+    frame.run()
+
+    expected = after_first.copy()
+    expected[:, 1] ^= 1
+    assert frame.frame.shape == (5, 4)
+    assert np.array_equal(frame.frame, expected)
+    assert frame.samples.shape == (5, 0)
+
+    measured = Circuit(2).m([0, 1])
+    frame.update(circuit=measured).run()
+
+    assert frame.circuit is measured
+    assert frame.measurement_flips.shape == (5, 2)
+    assert frame.samples.shape == (5, 2)
 
 
 def test_depolarize2_samples_all_non_identity_pair_errors():

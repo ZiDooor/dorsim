@@ -94,6 +94,22 @@ The custom frame must have shape:
 (shots, 2n)
 ```
 
+You can continue from the current frame through another circuit on the same
+qubits:
+
+```python
+pf = PauliFrame(first_circuit, shots=1000, seed=1).run()
+first_flips = pf.measurement_flips.copy()
+
+pf.update(circuit=second_circuit).run()
+second_flips = pf.measurement_flips
+```
+
+This keeps `frame` and the random-number generator state, changes `circuit`,
+and resets `measurement_flips`, `samples`, and `_measurement_index`. Measurement
+record targets such as `target_rec(-1)` refer only to measurements in the
+current circuit segment after `update()`.
+
 ## Initialization
 
 The frame starts with random `I` or `Z` on each qubit in each shot:

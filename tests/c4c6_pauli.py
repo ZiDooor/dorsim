@@ -176,32 +176,26 @@ def concat_code(parent: CSSCode, children) -> CSSCode:
 class decoder:
     ERASURE = -1
 
-    def decode_qp(self, measurement_flips: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def decode_qp(self, measurement_flips: np.ndarray) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         assert m.shape[1] == 2
-        logical = m.astype(np.int8).copy()
-        status = np.ones(m.shape[0], dtype=np.int8)
-        return logical, status
+        return m.astype(np.int8).copy()
 
-    def decode_c4(self, measurement_flips: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def decode_c4(self, measurement_flips: np.ndarray) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         assert m.shape[1] == 4
         logical = np.full((m.shape[0], 2), self.ERASURE, dtype=np.int8)
-        status = np.full(m.shape[0], -1, dtype=np.int8)
         parity = np.bitwise_xor.reduce(m, axis=1)
         keep = parity == 0
         logical[keep, 0] = m[keep, 0] ^ m[keep, 2]
         logical[keep, 1] = m[keep, 2] ^ m[keep, 3]
-        status[keep] = 1
-        return logical, status
+        return logical
 
-    def decode_c6_children(self, child_logicals: np.ndarray, child_status: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def decode_c6_children(self, child_logicals: np.ndarray) -> np.ndarray:
         d = np.asarray(child_logicals, dtype=np.int8).copy()
-        status_in = np.asarray(child_status, dtype=np.int8)
         shots = d.shape[0]
         logical = np.full((shots, 2), self.ERASURE, dtype=np.int8)
-        status = np.full(shots, -1, dtype=np.int8)
-        erased = status_in == -1
+        erased = np.any(d == self.ERASURE, axis=2)
         erasure_count = erased.sum(axis=1)
 
         one = erasure_count == 1
@@ -237,10 +231,9 @@ class decoder:
         keep = one | (no_erasure & s1_ok & s2_ok)
         logical[keep, 0] = b1[keep] ^ b2[keep] ^ c2[keep]
         logical[keep, 1] = b2[keep] ^ c1[keep]
-        status[keep] = 1
-        return logical, status
+        return logical
 
-    def decode_code(self, measurement_flips: np.ndarray, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
+    def decode_code(self, measurement_flips: np.ndarray, code: CSSCode) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         assert m.shape[1] == code.n
         if code.name == "Qp" and not code.children:
@@ -254,11 +247,10 @@ class decoder:
         for child in code.children:
             child_results.append(self.decode_code(m[:, offset : offset + child.n], child))
             offset += child.n
-        child_logicals = np.stack([result[0] for result in child_results], axis=1)
-        child_status = np.stack([result[1] for result in child_results], axis=1)
-        return self.decode_c6_children(child_logicals, child_status)
+        child_logicals = np.stack(child_results, axis=1)
+        return self.decode_c6_children(child_logicals)
 
-    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> tuple[np.ndarray, np.ndarray]:
+    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         code = get_c4c6_code(level)
         assert m.shape[1] == code.n
@@ -354,12 +346,15 @@ def get_circuit_c4c6(level, err):
     )
 
 
-
-# c4 = get_c4()
-# c6 = get_c6()
-# qp = get_qp()
-# c10d3 = concat_code(c6, [qp, c4, c4])
-# print(f"{c10d3.name}: n={c10d3.n}")
+c4 = get_c4()
+c6 = get_c6()
+qp = get_qp()
+c10d3 = concat_code(c6, [qp, c4, c4])
+print(f"{c10d3.name}: n={c10d3.n}")
 # print(f"stabilizers=\n{c10d3.stabilizers}")
-# print(f"logical_x=\n{c10d3.logical_x}")
-# print(f"logical_z=\n{c10d3.logical_z}")
+print(f"logical_x=\n{c10d3.logical_x}")
+print(f"logical_z=\n{c10d3.logical_z}")
+
+m_test = np.array([[0, 1, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.uint8)
+dec = decoder()
+print(dec.decode_code(m_test, c10d3))

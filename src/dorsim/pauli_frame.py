@@ -20,14 +20,17 @@ class PauliFrame:
         self.samples: np.ndarray | None = None
         self._measurement_index = 0
 
-    def update(self, frame: np.ndarray | None = None) -> "PauliFrame":
-        self.measurement_flips = np.zeros((self.shots, self.circuit.num_measurements), dtype=np.uint8)
-        self.samples = None
-        self._measurement_index = 0
+    def update(self, frame: np.ndarray | None = None, *, circuit: Circuit | None = None) -> "PauliFrame":
+        if circuit is not None:
+            assert circuit.num_qubits == self.n
+            self.circuit = circuit
         if frame is not None:
             self.frame = np.asarray(frame, dtype=np.uint8).copy()
             self.shots = self.frame.shape[0]
             assert self.frame.shape == (self.shots, 2 * self.n)
+        self.measurement_flips = np.zeros((self.shots, self.circuit.num_measurements), dtype=np.uint8)
+        self.samples = None
+        self._measurement_index = 0
         return self
 
     def _conjugate_frame_by_gate(self, op: Operation) -> None:
