@@ -22,16 +22,44 @@ class PauliFrame:
 
     def update(self, frame: np.ndarray | None = None, *, circuit: Circuit | None = None) -> "PauliFrame":
         if circuit is not None:
-            assert circuit.num_qubits == self.n
             self.circuit = circuit
         if frame is not None:
-            self.frame = np.asarray(frame, dtype=np.uint8).copy()
-            self.shots = self.frame.shape[0]
-            assert self.frame.shape == (self.shots, 2 * self.n)
+            new_frame = np.asarray(frame, dtype=np.uint8).copy()
+            self.shots = new_frame.shape[0]
+            self.frame = new_frame
+        assert self.frame.shape[1] == 2 * self.circuit.num_qubits
+        self.n = self.circuit.num_qubits
         self.measurement_flips = np.zeros((self.shots, self.circuit.num_measurements), dtype=np.uint8)
         self.samples = None
         self._measurement_index = 0
         return self
+
+    def select_qubits(self, qubits, *, circuit: Circuit) -> "PauliFrame":
+        qubits = list(qubits)
+        assert len(qubits) == circuit.num_qubits
+        selected = self.frame[:, qubits + [self.n + q for q in qubits]]
+        return self.update(selected, circuit=circuit)
+
+    @classmethod
+    def bunch(cls, frames, *, circuit: Circuit, seed: int | None = None) -> "PauliFrame":
+        frames = list(frames)
+        shots = min(frame.shots for frame in frames)
+        total_n = sum(frame.n for frame in frames)
+        assert circuit.num_qubits == total_n
+
+        x_part = np.concatenate([frame.frame[:shots, : frame.n] for frame in frames], axis=1)
+        z_part = np.concatenate([frame.frame[:shots, frame.n :] for frame in frames], axis=1)
+
+        out = cls.__new__(cls)
+        out.circuit = circuit
+        out.n = total_n
+        out.shots = shots
+        out.rng = np.random.default_rng(seed)
+        out.frame = np.concatenate([x_part, z_part], axis=1).astype(np.uint8, copy=True)
+        out.measurement_flips = np.zeros((shots, circuit.num_measurements), dtype=np.uint8)
+        out.samples = None
+        out._measurement_index = 0
+        return out
 
     def _conjugate_frame_by_gate(self, op: Operation) -> None:
         if op.name in {"CX", "CZ"} and isinstance(op.targets[0], RecTarget):

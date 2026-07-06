@@ -110,6 +110,48 @@ and resets `measurement_flips`, `samples`, and `_measurement_index`. Measurement
 record targets such as `target_rec(-1)` refer only to measurements in the
 current circuit segment after `update()`.
 
+You can also keep only selected qubits, optionally reordering them, before
+continuing through another circuit:
+
+```python
+pf = PauliFrame(old_circuit, shots=1000, seed=1).run()
+
+next_circuit = Circuit(3).cx([0, 1]).m([0, 1, 2])
+pf.select_qubits([3, 0, 2], circuit=next_circuit).run()
+```
+
+If the old frame columns are:
+
+```text
+[X0 X1 X2 X3 | Z0 Z1 Z2 Z3]
+```
+
+then selecting `[3, 0, 2]` produces:
+
+```text
+[X3 X0 X2 | Z3 Z0 Z2]
+```
+
+To combine several independent Pauli frames into one larger frame, use
+`bunch()`:
+
+```python
+f1 = PauliFrame(circuit_a, shots=1000, seed=1).run()
+f2 = PauliFrame(circuit_b, shots=800, seed=2).run()
+
+next_circuit = Circuit(f1.n + f2.n).m(range(f1.n + f2.n))
+combined = PauliFrame.bunch([f1, f2], circuit=next_circuit)
+```
+
+The combined frame uses the first `min(f1.shots, f2.shots)` shots and orders
+qubits by input frame:
+
+```text
+[X_f1 X_f2 | Z_f1 Z_f2]
+```
+
+Old `measurement_flips` and `samples` are not copied into the combined frame.
+
 ## Initialization
 
 The frame starts with random `I` or `Z` on each qubit in each shot:

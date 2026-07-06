@@ -102,7 +102,18 @@ def test_pauli_frame_update_resets_outputs_and_optionally_replaces_frame():
     assert frame.frame is not newer_frame
     assert np.array_equal(frame.measurement_flips, np.zeros((4, 2), dtype=np.uint8))
 
+    resized_circuit = Circuit(3).m([0, 1, 2])
+    resized_frame = np.zeros((4, 6), dtype=np.uint8)
+    frame.update(resized_frame, circuit=resized_circuit)
+
+    assert frame.circuit is resized_circuit
+    assert frame.n == 3
+    assert frame.shots == 4
+    assert np.array_equal(frame.frame, resized_frame)
+    assert np.array_equal(frame.measurement_flips, np.zeros((4, 3), dtype=np.uint8))
+
     new_frame = np.ones((3, 4), dtype=np.uint8)
+    frame.update(new_frame, circuit=Circuit(2).m([0, 1]))
     frame.measurement_flips[:] = 1
     frame.samples = np.ones_like(frame.measurement_flips)
     frame._measurement_index = 2
@@ -143,6 +154,93 @@ def test_pauli_frame_update_to_second_circuit_continues_from_current_frame():
     assert frame.circuit is measured
     assert frame.measurement_flips.shape == (5, 2)
     assert frame.samples.shape == (5, 2)
+
+
+def test_pauli_frame_select_qubits_reorders_frame_and_continues():
+    source = PauliFrame(Circuit(3).m([0, 1, 2]), shots=2, seed=1)
+    source.frame = np.array(
+        [
+            [1, 0, 1, 0, 1, 1],
+            [0, 1, 0, 1, 0, 1],
+        ],
+        dtype=np.uint8,
+    )
+    source.measurement_flips[:] = 1
+    source.samples = np.ones_like(source.measurement_flips)
+    source._measurement_index = 3
+
+    next_circuit = Circuit(2).x_error([1], p=1).m([0, 1])
+    assert source.select_qubits([2, 0], circuit=next_circuit) is source
+
+    expected_selected = np.array(
+        [
+            [1, 1, 1, 0],
+            [0, 0, 1, 1],
+        ],
+        dtype=np.uint8,
+    )
+    assert source.n == 2
+    assert source.circuit is next_circuit
+    assert np.array_equal(source.frame, expected_selected)
+    assert np.array_equal(source.measurement_flips, np.zeros((2, 2), dtype=np.uint8))
+    assert source.samples is None
+    assert source._measurement_index == 0
+
+    source.run()
+
+    assert source.frame.shape == (2, 4)
+    assert source.measurement_flips.shape == (2, 2)
+    assert source.samples.shape == (2, 2)
+
+
+def test_pauli_frame_bunch_combines_frames_in_input_order():
+    f1 = PauliFrame(Circuit(2).m([0, 1]), shots=3, seed=1)
+    f2 = PauliFrame(Circuit(1).m([0]), shots=2, seed=2)
+    f1.frame = np.array(
+        [
+            [1, 0, 0, 1],
+            [0, 1, 1, 0],
+            [1, 1, 0, 0],
+        ],
+        dtype=np.uint8,
+    )
+    f2.frame = np.array(
+        [
+            [1, 0],
+            [0, 1],
+        ],
+        dtype=np.uint8,
+    )
+    old_f1 = f1.frame.copy()
+    old_f2 = f2.frame.copy()
+
+    circuit = Circuit(3).x_error([2], p=1).m([0, 1, 2])
+    combined = PauliFrame.bunch([f1, f2], circuit=circuit, seed=3)
+
+    expected = np.array(
+        [
+            [1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1],
+        ],
+        dtype=np.uint8,
+    )
+    assert combined.circuit is circuit
+    assert combined.n == 3
+    assert combined.shots == 2
+    assert np.array_equal(combined.frame, expected)
+    assert np.array_equal(combined.measurement_flips, np.zeros((2, 3), dtype=np.uint8))
+    assert combined.samples is None
+    assert combined._measurement_index == 0
+    assert np.array_equal(f1.frame, old_f1)
+    assert np.array_equal(f2.frame, old_f2)
+
+    combined.run()
+
+    expected_after_run = expected.copy()
+    expected_after_run[:, 2] ^= 1
+    assert np.array_equal(combined.frame[:, :3], expected_after_run[:, :3])
+    assert combined.measurement_flips.shape == (2, 3)
+    assert combined.samples.shape == (2, 3)
 
 
 def test_depolarize2_samples_all_non_identity_pair_errors():
