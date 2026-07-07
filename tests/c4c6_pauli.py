@@ -322,15 +322,17 @@ def get_circuit_c4(err):
         ])
     )
 
-def get_circuit_c4_b(err):
+def get_circuit_c4c6_bell(level, err):
+    n_q = 4 * 3 ** (level - 1)
+    ind_q = np.arange(n_q * 2)
     return (
-        C4C6Circuit(8)
-        .h_log(1, [0, 1, 2, 3])
-        .cx([0, 4, 1, 5, 2, 6, 3, 7])
-        .depolarize2([0, 4, 1, 5, 2, 6, 3, 7], err)
+        C4C6Circuit(2 * n_q)
+        .h_log(level, ind_q[:n_q])
+        .cx(np.column_stack((ind_q[:n_q], ind_q[n_q:])).ravel())
+        .depolarize2(np.column_stack((ind_q[:n_q], ind_q[n_q:])).ravel(), err)
     )
 
-def get_circuit_c4c6(level, err):
+def get_circuit_c4c6_p1(level, err):
     n_q = 4 * 3 ** (level - 1)
     n_sub = 4 * 3 ** (level - 2)
     ind_q = np.arange(n_q * 2)
@@ -338,6 +340,8 @@ def get_circuit_c4c6(level, err):
         C4C6Circuit(2 * n_q)
         .cx(np.column_stack((ind_q[n_sub:2 * n_sub], ind_q[2 * n_sub:3 * n_sub])).ravel())
         .depolarize2(np.column_stack((ind_q[n_sub:2 * n_sub], ind_q[2 * n_sub:3 * n_sub])).ravel(), err)
+        .cx(np.column_stack((ind_q[3 * n_sub:4 * n_sub], ind_q[4 * n_sub:5 * n_sub])).ravel())
+        .depolarize2(np.column_stack((ind_q[3 * n_sub:4 * n_sub], ind_q[4 * n_sub:5 * n_sub])).ravel(), err)
         .cx(np.column_stack((ind_q[5 * n_sub:], ind_q[:n_sub])).ravel())
         .depolarize2(np.column_stack((ind_q[5 * n_sub:], ind_q[:n_sub])).ravel(), err)
         .m(ind_q[:n_sub])
@@ -345,16 +349,65 @@ def get_circuit_c4c6(level, err):
         .m(ind_q[4 * n_sub:5 * n_sub])
     )
 
+def get_circuit_c4c6_p2(level, err):
+    n_q = 4 * 3 ** (level - 1)
+    n_sub = 4 * 3 ** (level - 2)
+    ind_q = np.arange(n_q)
+    return (
+        C4C6Circuit(n_q)
+        .u(level-1, ind_q[n_sub:2 * n_sub])
+        .u2(level-1, ind_q[2 * n_sub:])
+    )
+
+
+shot = 100
+er = 0.01
+
+dec = decoder()
 
 c4 = get_c4()
-c6 = get_c6()
-qp = get_qp()
-c10d3 = concat_code(c6, [qp, c4, c4])
-print(f"{c10d3.name}: n={c10d3.n}")
-# print(f"stabilizers=\n{c10d3.stabilizers}")
-print(f"logical_x=\n{c10d3.logical_x}")
-print(f"logical_z=\n{c10d3.logical_z}")
+c4c6_l2 = get_c4c6_code(2)
 
-m_test = np.array([[0, 1, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.uint8)
-dec = decoder()
-print(dec.decode_code(m_test, c10d3))
+logx_l1_1, logx_l1_2 = c4.logical_x[:, :4]
+logx_l2_1, logx_l2_2 = c4c6_l2.logical_x[:, :12]
+
+cir_l1 = get_circuit_c4(er)
+cir_l1_bell = get_circuit_c4c6_bell(1, er)
+cir_l2_p1 = get_circuit_c4c6_p1(2, er)
+cir_l2_p2 = get_circuit_c4c6_p2(2, er)
+
+# Prepare l1
+def get_PFrame_l1(shots):
+    # Get frame after circuit c4
+    pframe_l1 = PauliFrame(cir_l1, shots=shots).run()
+    # Post-selection
+    keep = (pframe_l1.samples.sum(axis=1) % 2) == 0
+    pframe_l1.update(pframe_l1.frame[keep])
+    pframe_l1.select_qubits([1, 3, 5, 7])
+    return pframe_l1
+
+# Prepare l1 Bell
+def get_PFrame_l1_bell(shots):
+    pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots), get_PFrame_l1(shots=shots)], circuit=cir_l1_bell).run()
+    return pframe_l1_bell
+
+# Prepare l2
+def get_PFrame_l2(shots):
+    pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots)], circuit=cir_l2_p1).run()
+    mea = pframe_l2.samples
+    re0, re1, re2 = dec.decode_code(mea[:, -12:-8], c4), dec.decode_code(mea[:, -8:-4], c4), dec.decode_code(mea[:, -4:], c4)
+    re = np.concatenate((re0, re1, re2), axis=1)
+    # post-select
+    mask = np.all(re != -1, axis=1) & ((re[:, [0, 2, 4]].sum(axis=1) % 2) == 0) & ((re[:, [1, 3, 5]].sum(axis=1) % 2) == 0)
+    frame_l2_new = pframe_l2.frame[mask]
+    pframe_l2.update(frame_l2_new)
+    pframe_l2.select_qubits(np.r_[4:8, 12:16, 20:24])
+    frame_temp0 = pframe_l2.frame
+    # correct
+    cor = re[mask].astype(np.uint8)
+    frame_temp0[:, :4] ^= ((cor[:, [0]] * logx_l1_1) ^ (cor[:, [1]] * logx_l1_2))
+    frame_temp0[:, 4:8] ^= (((cor[:, [0]] ^ cor[:, [2]]) * logx_l1_1) ^ ((cor[:, [1]] ^ cor[:, [3]]) * logx_l1_2))
+    pframe_l2.update(frame=frame_temp0, circuit=cir_l2_p2).run()
+    return pframe_l2
+
+pframe_l2 = get_PFrame_l2(shot)

@@ -44,9 +44,6 @@ LOCAL_MUL_PHASE = np.array(
 def identity_tableau(n: int) -> tuple[np.ndarray, np.ndarray]:
     tableau = np.eye(2*n, dtype=int)
     sign = np.zeros(2 * n, dtype=np.uint8)
-    # for q in range(n):
-    #     tableau[q, q] = 1
-    #     tableau[n + q, n + q] = 1
     return tableau, sign
 
 
