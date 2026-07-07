@@ -414,9 +414,8 @@ cir_l2_bell = get_circuit_c4c6_bell(2, er)
 cir_l2_bell_tele = get_circuit_c4c6_tele(2, er)
 
 # Prepare l1
-def get_PFrame_l1(shots, circuit):
+def get_PFrame_l1(shots, circuit): # circuit is cir_l1
     # Get frame after circuit c4
-    # pframe_l1 = PauliFrame(cir_l1, shots=shots).run()
     pframe_l1 = PauliFrame(circuit, shots=shots).run()
     # Post-selection
     keep = (pframe_l1.samples.sum(axis=1) % 2) == 0
@@ -425,15 +424,13 @@ def get_PFrame_l1(shots, circuit):
     return pframe_l1
 
 # Prepare l1 Bell
-def get_PFrame_l1_bell(shots, circuit):
-    # pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots), get_PFrame_l1(shots=shots)], circuit=cir_l1_bell).run()
-    pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots), get_PFrame_l1(shots=shots)], circuit=circuit).run()
+def get_PFrame_l1_bell(shots, circuits: list[Circuit]): # circuit are cir_l1, cir_l1_bell
+    pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots, circuit=circuits[0]), get_PFrame_l1(shots=shots, circuit=circuits[0])], circuit=circuits[1]).run()
     return pframe_l1_bell
 
 # Prepare l2
-def get_PFrame_l2(shots, circuits: list[Circuit]): # [Circuit] are cir_l2_p1, cir_l2_p2
-    # pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots)], circuit=cir_l2_p1).run()
-    pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots)], circuit=circuits[0]).run()
+def get_PFrame_l2(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2
+    pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots, circuits=circuits[:2]), get_PFrame_l1_bell(shots=shots, circuits=circuits[:2]), get_PFrame_l1_bell(shots=shots, circuits=circuits[:2])], circuit=circuits[2]).run()
     mea = pframe_l2.samples
     re_list = [dec.decode_code(mea[:, -12:-8], c4), dec.decode_code(mea[:, -8:-4], c4), dec.decode_code(mea[:, -4:], c4)]
     re = np.concatenate(re_list, axis=1)
@@ -448,29 +445,30 @@ def get_PFrame_l2(shots, circuits: list[Circuit]): # [Circuit] are cir_l2_p1, ci
     frame_temp0[:, :4] ^= ((cor[:, [0]] * logx_l1_1) ^ (cor[:, [1]] * logx_l1_2))
     frame_temp0[:, 4:8] ^= (((cor[:, [0]] ^ cor[:, [2]]) * logx_l1_1) ^ ((cor[:, [1]] ^ cor[:, [3]]) * logx_l1_2))
     # pframe_l2.update(frame=frame_temp0, circuit=cir_l2_p2).run()
-    pframe_l2.update(frame=frame_temp0, circuit=circuits[1]).run()
+    pframe_l2.update(frame=frame_temp0, circuit=circuits[3]).run()
     return pframe_l2
 
-def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l2_bell, cir_l2_bell_tele
-    # pframe_l2_bell = PauliFrame.bunch([get_PFrame_l2(shots=shots), get_PFrame_l2(shots=shots)], circuit=cir_l2_bell).run()
-    pframe_l2_bell = PauliFrame.bunch([get_PFrame_l2(shots=shots), get_PFrame_l2(shots=shots)], circuit=circuits[0]).run()
-    pframe_l1_bell_lst = [get_PFrame_l1_bell(shots=shots) for _ in range(6)]
+def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2, cir_l2_bell, cir_l2_bell_tele
+    pframe_l2_bell = PauliFrame.bunch([get_PFrame_l2(shots=shots, circuits=circuits[:4]), get_PFrame_l2(shots=shots, circuits=circuits[:4])], circuit=circuits[4]).run()
+    pframe_l1_bell_lst = [get_PFrame_l1_bell(shots=shots, circuits=circuits[:2]) for _ in range(6)]
     n_sub = 4
-    pframe_l2_edt = PauliFrame.bunch([pframe_l2_bell] + pframe_l1_bell_lst, circuit=cir_l2_bell_tele).run()
+    pframe_l2_edt = PauliFrame.bunch([pframe_l2_bell] + pframe_l1_bell_lst, circuit=circuits[5]).run()
     mea = pframe_l2_edt.samples
-    mask_p = np.all(mea != -1, axis=1)
-    mea_new = mea[mask_p]
+    # correct
+    rex = np.concatenate([dec.decode_code(mea[:, i*n_sub:(i+1)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
+    rez = np.concatenate([dec.decode_code(mea[:, (6 + i)*n_sub:(7 + i)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
+    mask_p = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
+    rex_new = rex[mask_p]
+    rez_new = rez[mask_p]
     frame_new = pframe_l2_edt.frame[mask_p]
     pframe_l2_edt.update(frame_new)
     pframe_l2_edt.select_qubits(np.r_[7*n_sub:8*n_sub, 9*n_sub:10*n_sub, 11*n_sub:12*n_sub, 13*n_sub:14*n_sub, 15*n_sub:16*n_sub, 17*n_sub:18*n_sub])
-    # correct
-    rex = np.concatenate([dec.decode_code(mea_new[:, i*n_sub:(i+1)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
-    rez = np.concatenate([dec.decode_code(mea_new[:, (6 + i)*n_sub:(7 + i)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
     frame_temp = pframe_l2_edt.frame
     for _ in range(6):
-        frame_temp[:, _*n_sub:(_ + 1)*n_sub] ^= ((rex[:, [_]]*logx_l1_1) ^ (rex[:, [_ + 1]]*logx_l1_2))
-        frame_temp[:, (_ + 6)*n_sub:(_ + 7)*n_sub] ^= ((rez[:, [_]]*logz_l1_1) ^ (rez[:, [_ + 1]]*logz_l1_2))
+        frame_temp[:, _*n_sub:(_ + 1)*n_sub] ^= ((rex_new[:, [_]]*logx_l1_1) ^ (rex_new[:, [_ + 1]]*logx_l1_2))
+        frame_temp[:, (_ + 6)*n_sub:(_ + 7)*n_sub] ^= ((rez_new[:, [_]]*logz_l1_1) ^ (rez_new[:, [_ + 1]]*logz_l1_2))
     pframe_l2_edt.update(frame_temp)
     return pframe_l2_edt
 
-
+pframe_l2_bell = get_PFrame_l2_bell(shots=shot, circuits=[cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2, cir_l2_bell, cir_l2_bell_tele])
+print(pframe_l2_bell.frame.shape)
