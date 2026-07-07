@@ -359,6 +359,40 @@ def get_circuit_c4c6_p2(level, err):
         .u2(level-1, ind_q[2 * n_sub:])
     )
 
+def get_circuit_c4c6_tele(level, err):
+    n_q = 4 * 3 ** (level - 1)
+    n_sub = 4 * 3 ** (level - 2)
+    ind_q = np.arange(n_q * 2 + n_sub * 12)
+    return (
+        C4C6Circuit(n_q * 2 + n_sub * 12)
+        .cx(np.column_stack((ind_q[:n_sub], ind_q[n_sub*6:n_sub*7])).ravel())
+        .depolarize2(np.column_stack((ind_q[:n_sub], ind_q[n_sub*6:n_sub*7])).ravel(), err)
+        .cx(np.column_stack((ind_q[n_sub:n_sub*2], ind_q[n_sub*8:n_sub*9])).ravel())
+        .depolarize2(np.column_stack((ind_q[n_sub:n_sub*2], ind_q[n_sub*8:n_sub*9])).ravel(), err)
+        .cx(np.column_stack((ind_q[n_sub*2:n_sub*3], ind_q[n_sub*10:n_sub*11])).ravel())
+        .depolarize2(np.column_stack((ind_q[n_sub*2:n_sub*3], ind_q[n_sub*10:n_sub*11])).ravel(), err)
+        .cx(np.column_stack((ind_q[n_sub*3:n_sub*4], ind_q[n_sub*12:n_sub*13])).ravel())
+        .depolarize2(np.column_stack((ind_q[n_sub*3:n_sub*4], ind_q[n_sub*12:n_sub*13])).ravel(), err)
+        .cx(np.column_stack((ind_q[n_sub*4:n_sub*5], ind_q[n_sub*14:n_sub*15])).ravel())
+        .depolarize2(np.column_stack((ind_q[n_sub*4:n_sub*5], ind_q[n_sub*14:n_sub*15])).ravel(), err)
+        .cx(np.column_stack((ind_q[n_sub*5:n_sub*6], ind_q[n_sub*16:n_sub*17])).ravel())
+        .depolarize2(np.column_stack((ind_q[n_sub*5:n_sub*6], ind_q[n_sub*16:n_sub*17])).ravel(), err)
+        .h_log(level-1, ind_q[n_sub*6:n_sub*7])
+        .h_log(level-1, ind_q[n_sub*8:n_sub*9])
+        .h_log(level-1, ind_q[n_sub*10:n_sub*11])
+        .h_log(level-1, ind_q[n_sub*12:n_sub*13])
+        .h_log(level-1, ind_q[n_sub*14:n_sub*15])
+        .h_log(level-1, ind_q[n_sub*16:n_sub*17])
+        .m(ind_q[:6*n_sub]) # measure X errors
+        .m(ind_q[n_sub*6:n_sub*7]) # measure Z errors
+        .m(ind_q[n_sub*8:n_sub*9])
+        .m(ind_q[n_sub*10:n_sub*11])
+        .m(ind_q[n_sub*12:n_sub*13])
+        .m(ind_q[n_sub*14:n_sub*15])
+        .m(ind_q[n_sub*16:n_sub*17])
+
+    )
+
 
 shot = 100
 er = 0.01
@@ -369,17 +403,21 @@ c4 = get_c4()
 c4c6_l2 = get_c4c6_code(2)
 
 logx_l1_1, logx_l1_2 = c4.logical_x[:, :4]
+logz_l1_1, logz_l1_2 = c4.logical_z[:, :4]
 logx_l2_1, logx_l2_2 = c4c6_l2.logical_x[:, :12]
 
 cir_l1 = get_circuit_c4(er)
 cir_l1_bell = get_circuit_c4c6_bell(1, er)
 cir_l2_p1 = get_circuit_c4c6_p1(2, er)
 cir_l2_p2 = get_circuit_c4c6_p2(2, er)
+cir_l2_bell = get_circuit_c4c6_bell(2, er)
+cir_l2_bell_tele = get_circuit_c4c6_tele(2, er)
 
 # Prepare l1
-def get_PFrame_l1(shots):
+def get_PFrame_l1(shots, circuit):
     # Get frame after circuit c4
-    pframe_l1 = PauliFrame(cir_l1, shots=shots).run()
+    # pframe_l1 = PauliFrame(cir_l1, shots=shots).run()
+    pframe_l1 = PauliFrame(circuit, shots=shots).run()
     # Post-selection
     keep = (pframe_l1.samples.sum(axis=1) % 2) == 0
     pframe_l1.update(pframe_l1.frame[keep])
@@ -387,16 +425,18 @@ def get_PFrame_l1(shots):
     return pframe_l1
 
 # Prepare l1 Bell
-def get_PFrame_l1_bell(shots):
-    pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots), get_PFrame_l1(shots=shots)], circuit=cir_l1_bell).run()
+def get_PFrame_l1_bell(shots, circuit):
+    # pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots), get_PFrame_l1(shots=shots)], circuit=cir_l1_bell).run()
+    pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots), get_PFrame_l1(shots=shots)], circuit=circuit).run()
     return pframe_l1_bell
 
 # Prepare l2
-def get_PFrame_l2(shots):
-    pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots)], circuit=cir_l2_p1).run()
+def get_PFrame_l2(shots, circuits: list[Circuit]): # [Circuit] are cir_l2_p1, cir_l2_p2
+    # pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots)], circuit=cir_l2_p1).run()
+    pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots), get_PFrame_l1_bell(shots=shots)], circuit=circuits[0]).run()
     mea = pframe_l2.samples
-    re0, re1, re2 = dec.decode_code(mea[:, -12:-8], c4), dec.decode_code(mea[:, -8:-4], c4), dec.decode_code(mea[:, -4:], c4)
-    re = np.concatenate((re0, re1, re2), axis=1)
+    re_list = [dec.decode_code(mea[:, -12:-8], c4), dec.decode_code(mea[:, -8:-4], c4), dec.decode_code(mea[:, -4:], c4)]
+    re = np.concatenate(re_list, axis=1)
     # post-select
     mask = np.all(re != -1, axis=1) & ((re[:, [0, 2, 4]].sum(axis=1) % 2) == 0) & ((re[:, [1, 3, 5]].sum(axis=1) % 2) == 0)
     frame_l2_new = pframe_l2.frame[mask]
@@ -407,7 +447,30 @@ def get_PFrame_l2(shots):
     cor = re[mask].astype(np.uint8)
     frame_temp0[:, :4] ^= ((cor[:, [0]] * logx_l1_1) ^ (cor[:, [1]] * logx_l1_2))
     frame_temp0[:, 4:8] ^= (((cor[:, [0]] ^ cor[:, [2]]) * logx_l1_1) ^ ((cor[:, [1]] ^ cor[:, [3]]) * logx_l1_2))
-    pframe_l2.update(frame=frame_temp0, circuit=cir_l2_p2).run()
+    # pframe_l2.update(frame=frame_temp0, circuit=cir_l2_p2).run()
+    pframe_l2.update(frame=frame_temp0, circuit=circuits[1]).run()
     return pframe_l2
 
-pframe_l2 = get_PFrame_l2(shot)
+def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l2_bell, cir_l2_bell_tele
+    # pframe_l2_bell = PauliFrame.bunch([get_PFrame_l2(shots=shots), get_PFrame_l2(shots=shots)], circuit=cir_l2_bell).run()
+    pframe_l2_bell = PauliFrame.bunch([get_PFrame_l2(shots=shots), get_PFrame_l2(shots=shots)], circuit=circuits[0]).run()
+    pframe_l1_bell_lst = [get_PFrame_l1_bell(shots=shots) for _ in range(6)]
+    n_sub = 4
+    pframe_l2_edt = PauliFrame.bunch([pframe_l2_bell] + pframe_l1_bell_lst, circuit=cir_l2_bell_tele).run()
+    mea = pframe_l2_edt.samples
+    mask_p = np.all(mea != -1, axis=1)
+    mea_new = mea[mask_p]
+    frame_new = pframe_l2_edt.frame[mask_p]
+    pframe_l2_edt.update(frame_new)
+    pframe_l2_edt.select_qubits(np.r_[7*n_sub:8*n_sub, 9*n_sub:10*n_sub, 11*n_sub:12*n_sub, 13*n_sub:14*n_sub, 15*n_sub:16*n_sub, 17*n_sub:18*n_sub])
+    # correct
+    rex = np.concatenate([dec.decode_code(mea_new[:, i*n_sub:(i+1)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
+    rez = np.concatenate([dec.decode_code(mea_new[:, (6 + i)*n_sub:(7 + i)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
+    frame_temp = pframe_l2_edt.frame
+    for _ in range(6):
+        frame_temp[:, _*n_sub:(_ + 1)*n_sub] ^= ((rex[:, [_]]*logx_l1_1) ^ (rex[:, [_ + 1]]*logx_l1_2))
+        frame_temp[:, (_ + 6)*n_sub:(_ + 7)*n_sub] ^= ((rez[:, [_]]*logz_l1_1) ^ (rez[:, [_ + 1]]*logz_l1_2))
+    pframe_l2_edt.update(frame_temp)
+    return pframe_l2_edt
+
+
