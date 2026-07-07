@@ -23,6 +23,8 @@ class PauliFrame:
     def update(self, frame: np.ndarray | None = None, *, circuit: Circuit | None = None) -> "PauliFrame":
         if circuit is not None:
             self.circuit = circuit
+        else:
+            self.circuit = Circuit(self.n)
         if frame is not None:
             new_frame = np.asarray(frame, dtype=np.uint8).copy()
             self.shots = new_frame.shape[0]
@@ -34,10 +36,12 @@ class PauliFrame:
         self._measurement_index = 0
         return self
 
-    def select_qubits(self, qubits, *, circuit: Circuit) -> "PauliFrame":
+    def select_qubits(self, qubits, *, circuit: Circuit | None = None) -> "PauliFrame":
         qubits = list(qubits)
-        assert len(qubits) == circuit.num_qubits
+        if circuit is not None:
+            assert len(qubits) == circuit.num_qubits
         selected = self.frame[:, qubits + [self.n + q for q in qubits]]
+        self.n = selected.shape[1] // 2
         return self.update(selected, circuit=circuit)
 
     @classmethod
@@ -187,6 +191,7 @@ class PauliFrame:
             elif op.name == "R":
                 for q in op.targets:
                     self._reset_z(q)
+        self.circuit = Circuit(self.n) # Reset the circuit
         if reference is None:
             self.samples = self.measurement_flips.copy()
         else:

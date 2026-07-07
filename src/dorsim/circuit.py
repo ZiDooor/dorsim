@@ -35,6 +35,7 @@ class Circuit:
     def __init__(self, num_qubits: int):
         self.num_qubits = int(num_qubits)
         self.operations: list[Operation] = []
+        # If there is no operation, identity?
 
     def _target(self, target: Target) -> Target:
         if isinstance(target, RecTarget):
