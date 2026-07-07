@@ -365,18 +365,8 @@ def get_circuit_c4c6_tele(level, err):
     ind_q = np.arange(n_q * 2 + n_sub * 12)
     return (
         C4C6Circuit(n_q * 2 + n_sub * 12)
-        .cx(np.column_stack((ind_q[:n_sub], ind_q[n_sub*6:n_sub*7])).ravel())
-        .depolarize2(np.column_stack((ind_q[:n_sub], ind_q[n_sub*6:n_sub*7])).ravel(), err)
-        .cx(np.column_stack((ind_q[n_sub:n_sub*2], ind_q[n_sub*8:n_sub*9])).ravel())
-        .depolarize2(np.column_stack((ind_q[n_sub:n_sub*2], ind_q[n_sub*8:n_sub*9])).ravel(), err)
-        .cx(np.column_stack((ind_q[n_sub*2:n_sub*3], ind_q[n_sub*10:n_sub*11])).ravel())
-        .depolarize2(np.column_stack((ind_q[n_sub*2:n_sub*3], ind_q[n_sub*10:n_sub*11])).ravel(), err)
-        .cx(np.column_stack((ind_q[n_sub*3:n_sub*4], ind_q[n_sub*12:n_sub*13])).ravel())
-        .depolarize2(np.column_stack((ind_q[n_sub*3:n_sub*4], ind_q[n_sub*12:n_sub*13])).ravel(), err)
-        .cx(np.column_stack((ind_q[n_sub*4:n_sub*5], ind_q[n_sub*14:n_sub*15])).ravel())
-        .depolarize2(np.column_stack((ind_q[n_sub*4:n_sub*5], ind_q[n_sub*14:n_sub*15])).ravel(), err)
-        .cx(np.column_stack((ind_q[n_sub*5:n_sub*6], ind_q[n_sub*16:n_sub*17])).ravel())
-        .depolarize2(np.column_stack((ind_q[n_sub*5:n_sub*6], ind_q[n_sub*16:n_sub*17])).ravel(), err)
+        .cx(np.column_stack((ind_q[:n_sub*6], np.concatenate((ind_q[n_sub*6:n_sub*7], ind_q[n_sub*8:n_sub*9], ind_q[n_sub*10:n_sub*11], ind_q[n_sub*12:n_sub*13], ind_q[n_sub*14:n_sub*15], ind_q[n_sub*16:n_sub*17])))).ravel())
+        .depolarize2(np.column_stack((ind_q[:n_sub*6], np.concatenate((ind_q[n_sub*6:n_sub*7], ind_q[n_sub*8:n_sub*9], ind_q[n_sub*10:n_sub*11], ind_q[n_sub*12:n_sub*13], ind_q[n_sub*14:n_sub*15], ind_q[n_sub*16:n_sub*17])))).ravel(), err)
         .h_log(level-1, ind_q[n_sub*6:n_sub*7])
         .h_log(level-1, ind_q[n_sub*8:n_sub*9])
         .h_log(level-1, ind_q[n_sub*10:n_sub*11])
@@ -384,17 +374,11 @@ def get_circuit_c4c6_tele(level, err):
         .h_log(level-1, ind_q[n_sub*14:n_sub*15])
         .h_log(level-1, ind_q[n_sub*16:n_sub*17])
         .m(ind_q[:6*n_sub]) # measure X errors
-        .m(ind_q[n_sub*6:n_sub*7]) # measure Z errors
-        .m(ind_q[n_sub*8:n_sub*9])
-        .m(ind_q[n_sub*10:n_sub*11])
-        .m(ind_q[n_sub*12:n_sub*13])
-        .m(ind_q[n_sub*14:n_sub*15])
-        .m(ind_q[n_sub*16:n_sub*17])
-
+        .m(np.concatenate((ind_q[n_sub*6:n_sub*7], ind_q[n_sub*8:n_sub*9], ind_q[n_sub*10:n_sub*11], ind_q[n_sub*12:n_sub*13], ind_q[n_sub*14:n_sub*15], ind_q[n_sub*16:n_sub*17]))) # measure Z errors
     )
 
 
-shot = 100
+shot = 10000
 er = 0.01
 
 dec = decoder()
@@ -444,7 +428,6 @@ def get_PFrame_l2(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, cir_l
     cor = re[mask].astype(np.uint8)
     frame_temp0[:, :4] ^= ((cor[:, [0]] * logx_l1_1) ^ (cor[:, [1]] * logx_l1_2))
     frame_temp0[:, 4:8] ^= (((cor[:, [0]] ^ cor[:, [2]]) * logx_l1_1) ^ ((cor[:, [1]] ^ cor[:, [3]]) * logx_l1_2))
-    # pframe_l2.update(frame=frame_temp0, circuit=cir_l2_p2).run()
     pframe_l2.update(frame=frame_temp0, circuit=circuits[3]).run()
     return pframe_l2
 
@@ -454,7 +437,7 @@ def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, 
     n_sub = 4
     pframe_l2_edt = PauliFrame.bunch([pframe_l2_bell] + pframe_l1_bell_lst, circuit=circuits[5]).run()
     mea = pframe_l2_edt.samples
-    # correct
+    # post-select
     rex = np.concatenate([dec.decode_code(mea[:, i*n_sub:(i+1)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
     rez = np.concatenate([dec.decode_code(mea[:, (6 + i)*n_sub:(7 + i)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
     mask_p = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
@@ -464,6 +447,7 @@ def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, 
     pframe_l2_edt.update(frame_new)
     pframe_l2_edt.select_qubits(np.r_[7*n_sub:8*n_sub, 9*n_sub:10*n_sub, 11*n_sub:12*n_sub, 13*n_sub:14*n_sub, 15*n_sub:16*n_sub, 17*n_sub:18*n_sub])
     frame_temp = pframe_l2_edt.frame
+    # correct
     for _ in range(6):
         frame_temp[:, _*n_sub:(_ + 1)*n_sub] ^= ((rex_new[:, [_]]*logx_l1_1) ^ (rex_new[:, [_ + 1]]*logx_l1_2))
         frame_temp[:, (_ + 6)*n_sub:(_ + 7)*n_sub] ^= ((rez_new[:, [_]]*logz_l1_1) ^ (rez_new[:, [_ + 1]]*logz_l1_2))
