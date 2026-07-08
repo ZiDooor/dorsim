@@ -11,9 +11,12 @@ from dorsim import Circuit, Operation, PauliFrame, TableauSim, target_rec
 from dorsim.pauli import bits_from_code, code_from_bits, local_conjugation_map
 
 
-def test_flat_stim_style_operation_storage():
+def test_operation_storage_splits_iterable_targets():
     circuit = Circuit(4).cx([0, 1, 2, 3])
-    assert circuit.operations == [Operation("CX", (0, 1, 2, 3), 0.0)]
+    assert circuit.operations == [
+        Operation("CX", (0, 1), 0.0),
+        Operation("CX", (2, 3), 0.0),
+    ]
 
     noise = Circuit(2).depolarize2([0, 1], 0.25)
     assert noise.operations == [Operation("DEPOLARIZE2", (0, 1), 0.25)]
@@ -21,7 +24,11 @@ def test_flat_stim_style_operation_storage():
     assert noise.without_noise().operations == []
 
     measured = Circuit(3).m([0, 1]).mx([2])
-    assert measured.operations == [Operation("M", (0, 1), 0.0), Operation("MX", (2,), 0.0)]
+    assert measured.operations == [
+        Operation("M", (0,), 0.0),
+        Operation("M", (1,), 0.0),
+        Operation("MX", (2,), 0.0),
+    ]
     assert measured.num_measurements == 3
 
 

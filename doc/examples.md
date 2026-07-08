@@ -164,7 +164,6 @@ dorsim_circuit = (
     .m(list(range(8)))
 )
 
-assert str(dorsim_circuit.to_stim_circuit()) == str(stim_circuit)
 print(dorsim_circuit.to_stim_circuit())
 ```
 

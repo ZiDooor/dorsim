@@ -46,70 +46,105 @@ class Circuit:
         self.operations.append(Operation(name.upper(), tuple(self._target(t) for t in targets), float(p)))
         return self
 
-    def _targets(self, targets: Iterable[Target]) -> tuple[Target, ...]:
-        return tuple(self._target(t) for t in targets)
-
-    def _append_targets(self, name: str, targets: Iterable[Target], *, p: float = 0.0) -> "Circuit":
-        return self.append(name, *self._targets(targets), p=p)
-
-    def _append_pair_targets(self, name: str, targets: Iterable[Target], *, p: float = 0.0) -> "Circuit":
-        flat = self._targets(targets)
-        assert len(flat) % 2 == 0
-        return self.append(name, *flat, p=p)
-
     def h(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("H", targets)
+        for q in targets:
+            self.append("H", q)
+        return self
 
     def s(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("S", targets)
+        for q in targets:
+            self.append("S", q)
+        return self
 
     def sdg(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("S_DAG", targets)
+        for q in targets:
+            self.append("S_DAG", q)
+        return self
 
     def x(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("X", targets)
+        for q in targets:
+            self.append("X", q)
+        return self
 
     def y(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("Y", targets)
+        for q in targets:
+            self.append("Y", q)
+        return self
 
     def z(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("Z", targets)
+        for q in targets:
+            self.append("Z", q)
+        return self
 
-    def cx(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_pair_targets("CX", targets)
+    def cx(self, targets: Iterable[Target]) -> "Circuit":
+        flat = list(targets)
+        assert len(flat) % 2 == 0
+        for k in range(0, len(flat), 2):
+            self.append("CX", flat[k], flat[k + 1])
+        return self
 
     def cy(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_pair_targets("CY", targets)
+        flat = list(targets)
+        assert len(flat) % 2 == 0
+        for k in range(0, len(flat), 2):
+            self.append("CY", flat[k], flat[k + 1])
+        return self
 
-    def cz(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_pair_targets("CZ", targets)
+    def cz(self, targets: Iterable[Target]) -> "Circuit":
+        flat = list(targets)
+        assert len(flat) % 2 == 0
+        for k in range(0, len(flat), 2):
+            self.append("CZ", flat[k], flat[k + 1])
+        return self
 
     def swap(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_pair_targets("SWAP", targets)
+        flat = list(targets)
+        assert len(flat) % 2 == 0
+        for k in range(0, len(flat), 2):
+            self.append("SWAP", flat[k], flat[k + 1])
+        return self
 
     def m(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("M", targets)
+        for q in targets:
+            self.append("M", q)
+        return self
 
     def mx(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("MX", targets)
+        for q in targets:
+            self.append("MX", q)
+        return self
 
     def r(self, targets: Iterable[int]) -> "Circuit":
-        return self._append_targets("R", targets)
+        for q in targets:
+            self.append("R", q)
+        return self
 
     def x_error(self, targets: Iterable[int], p: float) -> "Circuit":
-        return self._append_targets("X_ERROR", targets, p=p)
+        for q in targets:
+            self.append("X_ERROR", q, p=p)
+        return self
 
     def y_error(self, targets: Iterable[int], p: float) -> "Circuit":
-        return self._append_targets("Y_ERROR", targets, p=p)
+        for q in targets:
+            self.append("Y_ERROR", q, p=p)
+        return self
 
     def z_error(self, targets: Iterable[int], p: float) -> "Circuit":
-        return self._append_targets("Z_ERROR", targets, p=p)
+        for q in targets:
+            self.append("Z_ERROR", q, p=p)
+        return self
 
     def depolarize1(self, targets: Iterable[int], p: float) -> "Circuit":
-        return self._append_targets("DEPOLARIZE1", targets, p=p)
+        for q in targets:
+            self.append("DEPOLARIZE1", q, p=p)
+        return self
 
     def depolarize2(self, targets: Iterable[int], p: float) -> "Circuit":
-        return self._append_pair_targets("DEPOLARIZE2", targets, p=p)
+        flat = list(targets)
+        assert len(flat) % 2 == 0
+        for k in range(0, len(flat), 2):
+            self.append("DEPOLARIZE2", flat[k], flat[k + 1], p=p)
+        return self
 
     @property
     def num_measurements(self) -> int:

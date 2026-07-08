@@ -26,10 +26,16 @@ Examples:
 
 ```python
 Circuit(4).h([0, 2]).operations
-# [Operation(name="H", targets=(0, 2), p=0.0)]
+# [
+#     Operation(name="H", targets=(0,), p=0.0),
+#     Operation(name="H", targets=(2,), p=0.0),
+# ]
 
 Circuit(4).cx([0, 1, 2, 3]).operations
-# [Operation(name="CX", targets=(0, 1, 2, 3), p=0.0)]
+# [
+#     Operation(name="CX", targets=(0, 1), p=0.0),
+#     Operation(name="CX", targets=(2, 3), p=0.0),
+# ]
 ```
 
 The API is iterable-only. Use lists, tuples, ranges, or other iterables.
@@ -47,7 +53,7 @@ Circuit(4).y([1])
 Circuit(4).z([2])
 ```
 
-`h([0, 1, 2])` stores one flat operation with targets `(0, 1, 2)`.
+`h([0, 1, 2])` stores three operations: `H 0`, `H 1`, and `H 2`.
 
 ## Two-Qubit Gates
 
@@ -63,6 +69,8 @@ This means:
 CX 0 1
 CX 2 3
 ```
+
+The circuit stores these as two separate `Operation("CX", ...)` entries.
 
 Available two-qubit gates:
 

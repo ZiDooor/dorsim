@@ -377,25 +377,35 @@ def get_circuit_c4c6_tele(level, err):
         .m(np.concatenate((ind_q[n_sub*6:n_sub*7], ind_q[n_sub*8:n_sub*9], ind_q[n_sub*10:n_sub*11], ind_q[n_sub*12:n_sub*13], ind_q[n_sub*14:n_sub*15], ind_q[n_sub*16:n_sub*17]))) # measure Z errors
     )
 
+def get_circuit_tele(level, err):
+    n_q = 4 * 3 ** (level - 1)
+    ind_q = np.arange(n_q * 8)
+    return (
+        C4C6Circuit(n_q * 8)
+        .cx(np.column_stack((ind_q[:n_q], ind_q[4*n_q:5*n_q])).ravel())
+        .depolarize2(np.column_stack((ind_q[:n_q], ind_q[4*n_q:5*n_q])).ravel(), err)
+        .cx(np.column_stack((ind_q[2*n_q:3*n_q], ind_q[6*n_q:7*n_q])).ravel())
+        .depolarize2(np.column_stack((ind_q[2*n_q:3*n_q], ind_q[6*n_q:7*n_q])).ravel(), err)
+        .h_log(level, ind_q[4*n_q:5*n_q])
+        .h_log(level, ind_q[6*n_q:7*n_q])
+        .m(ind_q[:n_q]) # measure X errors
+        .m(ind_q[2*n_q:3*n_q])
+        .m(ind_q[4*n_q:5*n_q]) # measure Z errors
+        .m(ind_q[6*n_q:7*n_q])
+    )
 
-shot = 10000
-er = 0.01
-
-dec = decoder()
-
-c4 = get_c4()
-c4c6_l2 = get_c4c6_code(2)
-
-logx_l1_1, logx_l1_2 = c4.logical_x[:, :4]
-logz_l1_1, logz_l1_2 = c4.logical_z[:, :4]
-logx_l2_1, logx_l2_2 = c4c6_l2.logical_x[:, :12]
-
-cir_l1 = get_circuit_c4(er)
-cir_l1_bell = get_circuit_c4c6_bell(1, er)
-cir_l2_p1 = get_circuit_c4c6_p1(2, er)
-cir_l2_p2 = get_circuit_c4c6_p2(2, er)
-cir_l2_bell = get_circuit_c4c6_bell(2, er)
-cir_l2_bell_tele = get_circuit_c4c6_tele(2, er)
+def get_circuit_meaNdec(level):
+    n_q = 4 * 3 ** (level - 1)
+    ind_q = np.arange(n_q*4)
+    return (
+        C4C6Circuit(n_q*4)
+        .cx(np.column_stack((ind_q[:n_q], ind_q[n_q:2*n_q])).ravel())
+        .cx(np.column_stack((ind_q[2*n_q:3*n_q], ind_q[3*n_q:4*n_q])).ravel())
+        .h_log(level, ind_q[:n_q])
+        .h_log(level, ind_q[2*n_q:3*n_q])
+        .m(ind_q[:2*n_q]) # measure X errors
+        .m(ind_q[2*n_q:4*n_q]) # measure Z errors
+    )
 
 # Prepare l1
 def get_PFrame_l1(shots, circuit): # circuit is cir_l1
@@ -438,11 +448,11 @@ def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, 
     pframe_l2_edt = PauliFrame.bunch([pframe_l2_bell] + pframe_l1_bell_lst, circuit=circuits[5]).run()
     mea = pframe_l2_edt.samples
     # post-select
-    rex = np.concatenate([dec.decode_code(mea[:, i*n_sub:(i+1)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
-    rez = np.concatenate([dec.decode_code(mea[:, (6 + i)*n_sub:(7 + i)*n_sub], c4) for i in range(6)], axis=1).astype(np.uint8)
+    rex = np.concatenate([dec.decode_code(mea[:, i*n_sub:(i+1)*n_sub], c4) for i in range(6)], axis=1)
+    rez = np.concatenate([dec.decode_code(mea[:, (6 + i)*n_sub:(7 + i)*n_sub], c4) for i in range(6)], axis=1)
     mask_p = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
-    rex_new = rex[mask_p]
-    rez_new = rez[mask_p]
+    rex_new = rex[mask_p].astype(np.uint8)
+    rez_new = rez[mask_p].astype(np.uint8)
     frame_new = pframe_l2_edt.frame[mask_p]
     pframe_l2_edt.update(frame_new)
     pframe_l2_edt.select_qubits(np.r_[7*n_sub:8*n_sub, 9*n_sub:10*n_sub, 11*n_sub:12*n_sub, 13*n_sub:14*n_sub, 15*n_sub:16*n_sub, 17*n_sub:18*n_sub])
@@ -454,5 +464,71 @@ def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, 
     pframe_l2_edt.update(frame_temp)
     return pframe_l2_edt
 
-pframe_l2_bell = get_PFrame_l2_bell(shots=shot, circuits=[cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2, cir_l2_bell, cir_l2_bell_tele])
-print(pframe_l2_bell.frame.shape)
+
+
+shot = 100
+er = 0.01
+
+dec = decoder()
+
+c4 = get_c4()
+c4c6_l2 = get_c4c6_code(2)
+
+logx_l1_1, logx_l1_2 = c4.logical_x[:, :4]
+logz_l1_1, logz_l1_2 = c4.logical_z[:, :4]
+logx_l2_1, logx_l2_2 = c4c6_l2.logical_x[:, :12]
+logz_l2_1, logz_l2_2 = c4c6_l2.logical_z[:, :12]
+
+cir_l1_i = get_circuit_c4(0)
+cir_l1_bell_i = get_circuit_c4c6_bell(1, 0)
+cir_l2_p1_i = get_circuit_c4c6_p1(2, 0)
+cir_l2_p2_i = get_circuit_c4c6_p2(2, 0)
+cir_l2_bell_i = get_circuit_c4c6_bell(2, 0)
+
+cir_l1 = get_circuit_c4(er)
+cir_l1_bell = get_circuit_c4c6_bell(1, er)
+cir_l2_p1 = get_circuit_c4c6_p1(2, er)
+cir_l2_p2 = get_circuit_c4c6_p2(2, er)
+cir_l2_bell = get_circuit_c4c6_bell(2, er)
+cir_l2_bell_tele = get_circuit_c4c6_tele(2, er)
+
+# pframe_l2_bell = get_PFrame_l2_bell(shots=shot, circuits=[cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2, cir_l2_bell, cir_l2_bell_tele])
+
+
+# level 1
+n_q = 4
+ind_q = np.arange(16)
+# Dep error
+cir_a = (
+    C4C6Circuit(16)
+    .depolarize2(np.column_stack((ind_q[:4], ind_q[8:12])).ravel(), er)
+)
+pframe_l1 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i])], circuit=cir_a).run()
+# ECT
+cir_b = get_circuit_tele(1, er)
+pframe_l1_ect = PauliFrame.bunch([pframe_l1, get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell])], circuit=cir_b).run()
+mea = pframe_l1_ect.samples
+rex = np.concatenate([dec.decode_code(mea[:, i*4:(i+1)*4], c4) for i in range(2)], axis=1)
+rez = np.concatenate([dec.decode_code(mea[:, (2 + i)*4:(3 + i)*4], c4) for i in range(2)], axis=1)
+mask = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
+# correct
+rex, rez = rex.astype(np.uint8), rez.astype(np.uint8)
+frame_corrected = pframe_l1_ect.frame
+frame_corrected[mask, 5*n_q:6*n_q] ^= ((rex[mask][:, [0]]*logx_l1_1) ^ (rex[mask][:, [1]]*logx_l1_2))
+frame_corrected[mask, 7*n_q:8*n_q] ^= ((rex[mask][:, [2]]*logx_l1_1) ^ (rex[mask][:, [3]]*logx_l1_2))
+frame_corrected[mask, 8*n_q + 5*n_q:8*n_q + 6*n_q] ^= ((rez[mask][:, [0]]*logz_l1_1) ^ (rez[mask][:, [1]]*logz_l1_2))
+frame_corrected[mask, 8*n_q + 7*n_q:8*n_q + 8*n_q] ^= ((rez[mask][:, [2]]*logz_l1_1) ^ (rez[mask][:, [3]]*logz_l1_2))
+# select qubits
+pframe_l1_ect.update(frame=frame_corrected)
+pframe_l1_ect.select_qubits(np.r_[4:8, 12:16, 20:24, 28:32])
+# relabel
+circ_relabel = (
+    Circuit(16)
+    .swap(np.column_stack((ind_q[8:12], ind_q[12:16])).ravel())
+    .swap(np.column_stack((ind_q[4:8], ind_q[12:16])).ravel())
+    .swap(np.column_stack((ind_q[:4], ind_q[4:8])).ravel())
+)
+pframe_l1_ect.update(circuit=circ_relabel).run()
+# measure and decode
+mea_end = pframe_l1_ect.update(circuit=get_circuit_meaNdec(1)).run().samples
+print(mea_end.shape)
