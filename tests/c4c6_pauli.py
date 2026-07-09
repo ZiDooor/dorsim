@@ -1,10 +1,10 @@
-import functools
 import itertools
 import sys
 from pathlib import Path
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.special
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -20,6 +20,7 @@ class CSSCode:
     logical_x: np.ndarray
     logical_z: np.ndarray
     children: tuple["CSSCode", ...] = ()
+    parent: "CSSCode | None" = None
 
 
 def embed_bsr(row: np.ndarray, offset: int, total_n: int) -> np.ndarray:
@@ -172,6 +173,7 @@ def concat_code(parent: CSSCode, children) -> CSSCode:
             dtype=np.uint8,
         ),
         children=children,
+        parent=parent,
     )
 
 
@@ -259,188 +261,220 @@ class decoder:
         return self.decode_code(m, code)
 
 
-def _gf2_matmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    return (np.asarray(a, dtype=np.uint8) @ np.asarray(b, dtype=np.uint8)) & 1
-
-
-def _logsumexp(a: np.ndarray, axis=None, keepdims: bool = False) -> np.ndarray:
-    m = np.max(a, axis=axis, keepdims=True)
-    out = np.log(np.sum(np.exp(a - m), axis=axis, keepdims=True)) + m
-    return out if keepdims else np.squeeze(out, axis=axis)
-
-
-@functools.lru_cache(maxsize=None)
-def _bit_patterns(width: int) -> np.ndarray:
-    return np.array(list(itertools.product([0, 1], repeat=width)), dtype=np.uint8)
-
-
 def _bits_to_index(bits: np.ndarray) -> np.ndarray:
     bits = np.asarray(bits, dtype=np.uint8)
     weights = (1 << np.arange(bits.shape[-1] - 1, -1, -1, dtype=np.int64))
     return (bits.astype(np.int64) * weights).sum(axis=-1)
 
 
-@functools.lru_cache(maxsize=None)
-def _base_side_matrices(name: str, xz: str) -> tuple[np.ndarray, np.ndarray]:
-    code = get_c4() if name == "C4" else get_c6()
-    n = code.n
-    if xz == "X":
-        check = code.stabilizers[:, n:]
-        logical = code.logical_z[:, n:]
-    else:
-        check = code.stabilizers[:, :n]
-        logical = code.logical_x[:, :n]
-    check = check[np.any(check, axis=1)]
-    return check.astype(np.uint8), logical.astype(np.uint8)
-
-
-@functools.lru_cache(maxsize=None)
-def _pure_errors(name: str, xz: str) -> np.ndarray:
-    if name == "C4":
-        if xz == "X":
-            return np.array([[0, 0, 0, 0], [0, 1, 0, 0]], dtype=np.uint8)
-        return np.array([[0, 0, 0, 0], [0, 0, 1, 0]], dtype=np.uint8)
-    if xz == "X":
-        return np.array(
-            [
-                [0, 0, 0, 0, 0, 0],
-                [0, 1, 0, 0, 0, 0],
-                [0, 0, 0, 0, 1, 0],
-                [1, 0, 0, 0, 0, 0],
-            ],
-            dtype=np.uint8,
-        )
-    return np.array(
-        [
-            [0, 0, 0, 0, 0, 0],
-            [0, 1, 0, 0, 0, 0],
-            [0, 0, 0, 0, 1, 0],
-            [0, 0, 0, 0, 0, 1],
-        ],
-        dtype=np.uint8,
-    )
-
-
-@functools.lru_cache(maxsize=None)
-def _base_log_prob_table(name: str, xz: str, p: float) -> np.ndarray:
-    check, logical = _base_side_matrices(name, xz)
-    pure = _pure_errors(name, xz)
-    check_list = _gf2_matmul(_bit_patterns(check.shape[0]), check)
-    logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
-    logp = np.log(float(p))
-    log1mp = np.log1p(-float(p))
-    table = np.empty((pure.shape[0], logical_list.shape[0]), dtype=np.float64)
-    for s in range(pure.shape[0]):
-        for l in range(logical_list.shape[0]):
-            candidates = (pure[s] ^ logical_list[l] ^ check_list).astype(np.uint8)
-            weight = candidates.sum(axis=1)
-            table[s, l] = _logsumexp(logp * weight + log1mp * (candidates.shape[1] - weight), axis=0)
-        table[s] -= _logsumexp(table[s], axis=0)
-    return table
-
-
-def _base_recovery_options(name: str, xz: str, syndrome_indices: np.ndarray) -> np.ndarray:
-    _, logical = _base_side_matrices(name, xz)
-    pure = _pure_errors(name, xz)
-    logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
-    return (pure[syndrome_indices, None, :] ^ logical_list[None, :, :]).astype(np.uint8)
-
-
-@functools.lru_cache(maxsize=None)
-def _c6_child_logical_table(xz: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    check, logical = _base_side_matrices("C6", xz)
-    pure = _pure_errors("C6", xz)
-    check_list = _gf2_matmul(_bit_patterns(check.shape[0]), check)
-    logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
-    local = (pure[:, None, None, :] ^ logical_list[None, :, None, :] ^ check_list[None, None, :, :]).astype(np.uint8)
-    child_logicals = _bits_to_index(local.reshape(pure.shape[0], logical_list.shape[0], check_list.shape[0], 3, 2))
-    return check, logical, child_logicals
-
-
 class PoulinDecoder:
-    def __init__(self, p: float, XZ: str = "X"):
+    def __init__(self, XZ: str, code: CSSCode, p: float = 0.01):
         assert 0 < p < 1
         assert XZ in {"X", "Z"}
         self.p = float(p)
         self.XZ = XZ
-        self.logical_bits = _bit_patterns(2)
-        self.c4_log_prob = _base_log_prob_table("C4", self.XZ, self.p)
-        self.c6_log_prob = _base_log_prob_table("C6", self.XZ, self.p)
-        self.c6_check, self.c6_logical, self.c6_child_logicals = _c6_child_logical_table(self.XZ)
+        self.code = code
+        self.check = self._measurement_check(code)
+        self.decode_check, self.decode_logical = self._side_matrices_for_code(code)
+        self._table_cache = {}
 
-    def decode_code(self, measurement_flips: np.ndarray, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
-        m = np.asarray(measurement_flips, dtype=np.uint8)
-        log_prob, recovery_options, _ = self._decode_node(m, code)
+    def set_physical_rate(self, p: float) -> None:
+        assert 0 < p < 1
+        self.p = float(p)
+        self._table_cache = {}
+
+    def decode(self, syndrome: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        return self.decode_syndrome(syndrome)
+
+    def decode_syndrome(self, syndrome: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        s = np.asarray(syndrome, dtype=np.uint8)
+        was_1d = s.ndim == 1
+        if was_1d:
+            s = s[None, :]
+        assert s.ndim == 2 and s.shape[1] == (self.code.n - self.code.k) // 2
+
+        log_prob, recovery_options = self._decode_syndrome_node(s, self.code)
         best_logical = np.argmax(log_prob, axis=1)
-        recovery = recovery_options[np.arange(m.shape[0]), best_logical]
-        return recovery.astype(np.uint8), log_prob
+        recovery = recovery_options[np.arange(s.shape[0]), best_logical].astype(np.uint8)
+        if was_1d:
+            return recovery[0], {-1: log_prob[0]}
+        return recovery, {-1: log_prob}
 
-    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> tuple[np.ndarray, np.ndarray]:
-        return self.decode_code(measurement_flips, get_c4c6_code(level))
+    def decode_measurement(self, measurement_flips: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        m = np.asarray(measurement_flips, dtype=np.uint8)
+        was_1d = m.ndim == 1
+        if was_1d:
+            m = m[None, :]
+        assert m.ndim == 2 and m.shape[1] == self.code.n
+        syndrome = (m @ self.check.T) % 2
+        recovery, prob = self.decode_syndrome(syndrome)
+        if was_1d:
+            return recovery, prob
+        return recovery, prob
 
-    def _decode_node(self, m: np.ndarray, code: CSSCode) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        assert m.ndim == 2 and m.shape[1] == code.n
-        if code.name == "Qp" and not code.children:
-            _, logical = self._side_matrices_for_code(code)
-            raw = _gf2_matmul(m, logical.T)
-            ind = _bits_to_index(raw)
-            log_prob = np.full((m.shape[0], 4), -np.inf, dtype=np.float64)
-            log_prob[np.arange(m.shape[0]), ind] = 0.0
-            logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
-            recovery_options = np.broadcast_to(logical_list, (m.shape[0], 4, code.n)).copy()
-            return log_prob, recovery_options.astype(np.uint8), raw.astype(np.uint8)
-        if code.name in {"C4", "C6"} and not code.children:
-            check, logical = self._side_matrices_for_code(code)
-            syn = _bits_to_index(_gf2_matmul(m, check.T))
-            raw = _gf2_matmul(m, logical.T)
-            table = self.c4_log_prob if code.name == "C4" else self.c6_log_prob
-            log_prob = table[syn]
-            recovery_options = _base_recovery_options(code.name, self.XZ, syn)
-            return log_prob, recovery_options, raw.astype(np.uint8)
+    def decode_code(
+        self,
+        measurement_flips: np.ndarray,
+        code: CSSCode | None = None,
+    ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        if code is not None and code is not self.code:
+            return PoulinDecoder(self.XZ, code, self.p).decode_measurement(measurement_flips)
+        return self.decode_measurement(measurement_flips)
 
+    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        return PoulinDecoder(self.XZ, get_c4c6_code(level), self.p).decode_measurement(measurement_flips)
+
+    def _decode_syndrome_node(self, syndrome: np.ndarray, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
+        assert syndrome.ndim == 2 and syndrome.shape[1] == (code.n - code.k) // 2
+        if not code.children:
+            data = self._local_table(code)
+            syn = _bits_to_index(syndrome)
+            log_prob = data["prob"][syn]
+            recovery_options = data["recovery"][syn]
+            return log_prob, recovery_options
+
+        data = self._local_table(code.parent)
+        parent_width = data["check"].shape[0]
         child_probs = []
-        child_raw = []
         child_recoveries = []
-        offset = 0
+        child_offset = 0
         for child in code.children:
-            prob, recovery_options, raw = self._decode_node(m[:, offset : offset + child.n], child)
+            child_width = (child.n - child.k) // 2
+            prob, recovery_options = self._decode_syndrome_node(
+                syndrome[:, child_offset : child_offset + child_width],
+                child,
+            )
             child_probs.append(prob)
             child_recoveries.append(recovery_options)
-            child_raw.append(raw)
-            offset += child.n
-        raw_children = np.concatenate(child_raw, axis=1)
-        syn = _bits_to_index(_gf2_matmul(raw_children, self.c6_check.T))
-        raw = _gf2_matmul(raw_children, self.c6_logical.T)
+            child_offset += child_width
+        parent_syndrome = syndrome[:, child_offset : child_offset + parent_width]
+        syn = _bits_to_index(parent_syndrome)
         probs = np.stack(child_probs, axis=1)
-        transitions = self.c6_child_logicals[syn]
-        x3 = np.zeros((m.shape[0], 4, 4), dtype=np.float64)
-        batch = np.arange(m.shape[0])[:, None, None]
-        for child_i in range(3):
-            x3 += probs[batch, child_i, transitions[..., child_i]]
-        log_prob = _logsumexp(x3, axis=2)
-        log_prob -= _logsumexp(log_prob, axis=1, keepdims=True)
+        local_ops = data["local_ops"][syn]
+        x3 = np.zeros((syndrome.shape[0], data["logical_list"].shape[0], data["check_list"].shape[0]), dtype=np.float64)
+        batch = np.arange(syndrome.shape[0])[:, None, None]
+        logical_offsets = np.cumsum([0] + [child.k for child in code.children])
+        for child_i, child in enumerate(code.children):
+            sl = slice(logical_offsets[child_i], logical_offsets[child_i + 1])
+            child_logical = _bits_to_index(local_ops[..., sl])
+            x3 += probs[batch, child_i, child_logical]
+        log_prob = scipy.special.logsumexp(x3, axis=2)
+        log_prob -= scipy.special.logsumexp(log_prob, axis=1, keepdims=True)
 
         best_stabilizer = np.argmax(x3, axis=2)
-        recovery_options = np.zeros((m.shape[0], 4, code.n), dtype=np.uint8)
-        for parent_logical in range(4):
-            desired = transitions[np.arange(m.shape[0]), parent_logical, best_stabilizer[:, parent_logical]]
+        recovery_options = np.zeros((syndrome.shape[0], data["logical_list"].shape[0], code.n), dtype=np.uint8)
+        for parent_logical in range(data["logical_list"].shape[0]):
             offset = 0
             for child_i, child in enumerate(code.children):
+                sl = slice(logical_offsets[child_i], logical_offsets[child_i + 1])
+                desired = _bits_to_index(local_ops[np.arange(syndrome.shape[0]), parent_logical, best_stabilizer[:, parent_logical], sl])
                 recovery_options[:, parent_logical, offset : offset + child.n] = child_recoveries[child_i][
-                    np.arange(m.shape[0]), desired[:, child_i]
+                    np.arange(syndrome.shape[0]), desired
                 ]
                 offset += child.n
-        return log_prob, recovery_options, raw.astype(np.uint8)
+        return log_prob, recovery_options
 
     def _side_matrices_for_code(self, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
         n = code.n
         if self.XZ == "X":
             check = code.stabilizers[:, n:]
-            logical = code.logical_z[:, n:]
+            logical = code.logical_x[:, :n]
         else:
             check = code.stabilizers[:, :n]
-            logical = code.logical_x[:, :n]
-        return check[np.any(check, axis=1)].astype(np.uint8), logical.astype(np.uint8)
+            logical = code.logical_z[:, n:]
+        check = check[np.any(check, axis=1)]
+        return check.astype(np.uint8), logical.astype(np.uint8)
+
+    def _measurement_check(self, code: CSSCode) -> np.ndarray:
+        n = code.n
+        if not code.children:
+            check = code.stabilizers[:, n:] if self.XZ == "X" else code.stabilizers[:, :n]
+            return check[np.any(check, axis=1)].astype(np.uint8)
+
+        rows = []
+        offset = 0
+        for child in code.children:
+            child_check = self._measurement_check(child)
+            if child_check.size:
+                embedded = np.zeros((child_check.shape[0], n), dtype=np.uint8)
+                embedded[:, offset : offset + child.n] = child_check
+                rows.append(embedded)
+            offset += child.n
+
+        lifted_parent_rows = code.stabilizers[: code.parent.stabilizers.shape[0]]
+        parent_check = lifted_parent_rows[:, n:] if self.XZ == "X" else lifted_parent_rows[:, :n]
+        parent_check = parent_check[np.any(parent_check, axis=1)]
+        if parent_check.size:
+            rows.append(parent_check.astype(np.uint8))
+        return np.vstack(rows).astype(np.uint8) if rows else np.zeros((0, n), dtype=np.uint8)
+
+    def _local_table(self, code: CSSCode) -> dict[str, np.ndarray]:
+        key = id(code)
+        if key in self._table_cache:
+            return self._table_cache[key]
+        check, logical = self._side_matrices_for_code(code)
+        pure_generators = self._pure_generators(code, check)
+
+        pure = (np.array(list(itertools.product([0, 1], repeat=pure_generators.shape[0])), dtype=np.uint8) @ pure_generators) % 2
+        check_list = (np.array(list(itertools.product([0, 1], repeat=check.shape[0])), dtype=np.uint8) @ check) % 2
+        logical_list = (np.array(list(itertools.product([0, 1], repeat=logical.shape[0])), dtype=np.uint8) @ logical) % 2
+        local_ops = (pure[:, None, None, :] ^ logical_list[None, :, None, :] ^ check_list[None, None, :, :]).astype(np.uint8) # local_ops[syndrome, logical_class, stabilizer_choice, qubit]
+        weight = local_ops.sum(axis=3)
+        score = np.log(self.p) * weight + np.log1p(-self.p) * (local_ops.shape[3] - weight)
+        prob = scipy.special.logsumexp(score, axis=2)
+        prob -= scipy.special.logsumexp(prob, axis=1, keepdims=True)
+        best_stabilizer = np.argmax(score, axis=2)
+        recovery = local_ops[
+            np.arange(local_ops.shape[0])[:, None],
+            np.arange(local_ops.shape[1])[None, :],
+            best_stabilizer,
+        ]
+        data = {
+            "check": check,
+            "logical_list": logical_list,
+            "check_list": check_list,
+            "local_ops": local_ops,
+            "prob": prob,
+            "recovery": recovery.astype(np.uint8),
+        }
+        self._table_cache[key] = data
+        return data
+
+    def _pure_generators(self, code: CSSCode, check: np.ndarray) -> np.ndarray:
+        if check.shape[0] == 0:
+            return np.zeros((0, check.shape[1]), dtype=np.uint8)
+        if code.name == "C4":
+            return np.array([[0, 1, 0, 0]], dtype=np.uint8) if self.XZ == "X" else np.array([[0, 0, 1, 0]], dtype=np.uint8)
+        if code.name == "C6":
+            if self.XZ == "X":
+                return np.array([[1, 1, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0]], dtype=np.uint8)
+            return np.array([[0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 1]], dtype=np.uint8)
+        return np.array(
+            [self._solve_gf2(check, target) for target in np.eye(check.shape[0], dtype=np.uint8)],
+            dtype=np.uint8,
+        )
+
+    def _solve_gf2(self, check: np.ndarray, target: np.ndarray) -> np.ndarray:
+        a = np.concatenate([check.copy(), target[:, None].astype(np.uint8)], axis=1)
+        row = 0
+        pivots = []
+        for col in range(check.shape[1]):
+            pivot = np.flatnonzero(a[row:, col])
+            if pivot.size == 0:
+                continue
+            pivot = row + int(pivot[0])
+            a[[row, pivot]] = a[[pivot, row]]
+            for r in range(a.shape[0]):
+                if r != row and a[r, col]:
+                    a[r] ^= a[row]
+            pivots.append(col)
+            row += 1
+            if row == check.shape[0]:
+                break
+        x = np.zeros(check.shape[1], dtype=np.uint8)
+        for r, col in enumerate(pivots):
+            x[col] = a[r, -1]
+        return x
 
 
 
@@ -718,8 +752,9 @@ circ_relabel = (
 pframe_l1_ect.update(circuit=circ_relabel).run()
 # measure and decode
 mea_end = pframe_l1_ect.update(circuit=get_circuit_meaNdec(1)).run().samples
-dec_end = PoulinDecoder(er, "X")
-recovery, prob_L = dec_end.decode_code(mea_end[:, :4], c4)
+dec_end = PoulinDecoder("X", c4, p=er)
+syndrome = mea_end[:, :4] @ dec_end.check.T % 2
+recovery, prob_L = dec_end.decode_syndrome(syndrome)
 print((mea_end[:, :4] ^ recovery) @ c4.logical_z[:, c4.n :].T % 2)
 
 
