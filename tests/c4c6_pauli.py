@@ -1,3 +1,5 @@
+import functools
+import itertools
 import sys
 from pathlib import Path
 from dataclasses import dataclass
@@ -49,7 +51,7 @@ def get_c4() -> CSSCode:
         ),
         logical_z=np.array(
             [
-                [0, 0, 0, 0, 0, 1, 0, 1],
+                [0, 0, 0, 0, 1, 0, 1, 0],
                 [0, 0, 0, 0, 0, 0, 1, 1],
             ],
             dtype=np.uint8,
@@ -255,6 +257,191 @@ class decoder:
         code = get_c4c6_code(level)
         assert m.shape[1] == code.n
         return self.decode_code(m, code)
+
+
+def _gf2_matmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return (np.asarray(a, dtype=np.uint8) @ np.asarray(b, dtype=np.uint8)) & 1
+
+
+def _logsumexp(a: np.ndarray, axis=None, keepdims: bool = False) -> np.ndarray:
+    m = np.max(a, axis=axis, keepdims=True)
+    out = np.log(np.sum(np.exp(a - m), axis=axis, keepdims=True)) + m
+    return out if keepdims else np.squeeze(out, axis=axis)
+
+
+@functools.lru_cache(maxsize=None)
+def _bit_patterns(width: int) -> np.ndarray:
+    return np.array(list(itertools.product([0, 1], repeat=width)), dtype=np.uint8)
+
+
+def _bits_to_index(bits: np.ndarray) -> np.ndarray:
+    bits = np.asarray(bits, dtype=np.uint8)
+    weights = (1 << np.arange(bits.shape[-1] - 1, -1, -1, dtype=np.int64))
+    return (bits.astype(np.int64) * weights).sum(axis=-1)
+
+
+@functools.lru_cache(maxsize=None)
+def _base_side_matrices(name: str, xz: str) -> tuple[np.ndarray, np.ndarray]:
+    code = get_c4() if name == "C4" else get_c6()
+    n = code.n
+    if xz == "X":
+        check = code.stabilizers[:, n:]
+        logical = code.logical_z[:, n:]
+    else:
+        check = code.stabilizers[:, :n]
+        logical = code.logical_x[:, :n]
+    check = check[np.any(check, axis=1)]
+    return check.astype(np.uint8), logical.astype(np.uint8)
+
+
+@functools.lru_cache(maxsize=None)
+def _pure_errors(name: str, xz: str) -> np.ndarray:
+    if name == "C4":
+        if xz == "X":
+            return np.array([[0, 0, 0, 0], [0, 1, 0, 0]], dtype=np.uint8)
+        return np.array([[0, 0, 0, 0], [0, 0, 1, 0]], dtype=np.uint8)
+    if xz == "X":
+        return np.array(
+            [
+                [0, 0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0],
+                [1, 0, 0, 0, 0, 0],
+            ],
+            dtype=np.uint8,
+        )
+    return np.array(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0, 1],
+        ],
+        dtype=np.uint8,
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _base_log_prob_table(name: str, xz: str, p: float) -> np.ndarray:
+    check, logical = _base_side_matrices(name, xz)
+    pure = _pure_errors(name, xz)
+    check_list = _gf2_matmul(_bit_patterns(check.shape[0]), check)
+    logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
+    logp = np.log(float(p))
+    log1mp = np.log1p(-float(p))
+    table = np.empty((pure.shape[0], logical_list.shape[0]), dtype=np.float64)
+    for s in range(pure.shape[0]):
+        for l in range(logical_list.shape[0]):
+            candidates = (pure[s] ^ logical_list[l] ^ check_list).astype(np.uint8)
+            weight = candidates.sum(axis=1)
+            table[s, l] = _logsumexp(logp * weight + log1mp * (candidates.shape[1] - weight), axis=0)
+        table[s] -= _logsumexp(table[s], axis=0)
+    return table
+
+
+def _base_recovery_options(name: str, xz: str, syndrome_indices: np.ndarray) -> np.ndarray:
+    _, logical = _base_side_matrices(name, xz)
+    pure = _pure_errors(name, xz)
+    logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
+    return (pure[syndrome_indices, None, :] ^ logical_list[None, :, :]).astype(np.uint8)
+
+
+@functools.lru_cache(maxsize=None)
+def _c6_child_logical_table(xz: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    check, logical = _base_side_matrices("C6", xz)
+    pure = _pure_errors("C6", xz)
+    check_list = _gf2_matmul(_bit_patterns(check.shape[0]), check)
+    logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
+    local = (pure[:, None, None, :] ^ logical_list[None, :, None, :] ^ check_list[None, None, :, :]).astype(np.uint8)
+    child_logicals = _bits_to_index(local.reshape(pure.shape[0], logical_list.shape[0], check_list.shape[0], 3, 2))
+    return check, logical, child_logicals
+
+
+class PoulinDecoder:
+    def __init__(self, p: float, XZ: str = "X"):
+        assert 0 < p < 1
+        assert XZ in {"X", "Z"}
+        self.p = float(p)
+        self.XZ = XZ
+        self.logical_bits = _bit_patterns(2)
+        self.c4_log_prob = _base_log_prob_table("C4", self.XZ, self.p)
+        self.c6_log_prob = _base_log_prob_table("C6", self.XZ, self.p)
+        self.c6_check, self.c6_logical, self.c6_child_logicals = _c6_child_logical_table(self.XZ)
+
+    def decode_code(self, measurement_flips: np.ndarray, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
+        m = np.asarray(measurement_flips, dtype=np.uint8)
+        log_prob, recovery_options, _ = self._decode_node(m, code)
+        best_logical = np.argmax(log_prob, axis=1)
+        recovery = recovery_options[np.arange(m.shape[0]), best_logical]
+        return recovery.astype(np.uint8), log_prob
+
+    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> tuple[np.ndarray, np.ndarray]:
+        return self.decode_code(measurement_flips, get_c4c6_code(level))
+
+    def _decode_node(self, m: np.ndarray, code: CSSCode) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        assert m.ndim == 2 and m.shape[1] == code.n
+        if code.name == "Qp" and not code.children:
+            _, logical = self._side_matrices_for_code(code)
+            raw = _gf2_matmul(m, logical.T)
+            ind = _bits_to_index(raw)
+            log_prob = np.full((m.shape[0], 4), -np.inf, dtype=np.float64)
+            log_prob[np.arange(m.shape[0]), ind] = 0.0
+            logical_list = _gf2_matmul(_bit_patterns(logical.shape[0]), logical)
+            recovery_options = np.broadcast_to(logical_list, (m.shape[0], 4, code.n)).copy()
+            return log_prob, recovery_options.astype(np.uint8), raw.astype(np.uint8)
+        if code.name in {"C4", "C6"} and not code.children:
+            check, logical = self._side_matrices_for_code(code)
+            syn = _bits_to_index(_gf2_matmul(m, check.T))
+            raw = _gf2_matmul(m, logical.T)
+            table = self.c4_log_prob if code.name == "C4" else self.c6_log_prob
+            log_prob = table[syn]
+            recovery_options = _base_recovery_options(code.name, self.XZ, syn)
+            return log_prob, recovery_options, raw.astype(np.uint8)
+
+        child_probs = []
+        child_raw = []
+        child_recoveries = []
+        offset = 0
+        for child in code.children:
+            prob, recovery_options, raw = self._decode_node(m[:, offset : offset + child.n], child)
+            child_probs.append(prob)
+            child_recoveries.append(recovery_options)
+            child_raw.append(raw)
+            offset += child.n
+        raw_children = np.concatenate(child_raw, axis=1)
+        syn = _bits_to_index(_gf2_matmul(raw_children, self.c6_check.T))
+        raw = _gf2_matmul(raw_children, self.c6_logical.T)
+        probs = np.stack(child_probs, axis=1)
+        transitions = self.c6_child_logicals[syn]
+        x3 = np.zeros((m.shape[0], 4, 4), dtype=np.float64)
+        batch = np.arange(m.shape[0])[:, None, None]
+        for child_i in range(3):
+            x3 += probs[batch, child_i, transitions[..., child_i]]
+        log_prob = _logsumexp(x3, axis=2)
+        log_prob -= _logsumexp(log_prob, axis=1, keepdims=True)
+
+        best_stabilizer = np.argmax(x3, axis=2)
+        recovery_options = np.zeros((m.shape[0], 4, code.n), dtype=np.uint8)
+        for parent_logical in range(4):
+            desired = transitions[np.arange(m.shape[0]), parent_logical, best_stabilizer[:, parent_logical]]
+            offset = 0
+            for child_i, child in enumerate(code.children):
+                recovery_options[:, parent_logical, offset : offset + child.n] = child_recoveries[child_i][
+                    np.arange(m.shape[0]), desired[:, child_i]
+                ]
+                offset += child.n
+        return log_prob, recovery_options, raw.astype(np.uint8)
+
+    def _side_matrices_for_code(self, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
+        n = code.n
+        if self.XZ == "X":
+            check = code.stabilizers[:, n:]
+            logical = code.logical_z[:, n:]
+        else:
+            check = code.stabilizers[:, :n]
+            logical = code.logical_x[:, :n]
+        return check[np.any(check, axis=1)].astype(np.uint8), logical.astype(np.uint8)
+
 
 
 def get_c4c6_code(level: int) -> CSSCode:
@@ -466,8 +653,8 @@ def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, 
 
 
 
-shot = 100
-er = 0.01
+shot = 10
+er = 0.9
 
 dec = decoder()
 
@@ -531,4 +718,25 @@ circ_relabel = (
 pframe_l1_ect.update(circuit=circ_relabel).run()
 # measure and decode
 mea_end = pframe_l1_ect.update(circuit=get_circuit_meaNdec(1)).run().samples
-print(mea_end.shape)
+dec_end = PoulinDecoder(er, "X")
+recovery, prob_L = dec_end.decode_code(mea_end[:, :4], c4)
+print((mea_end[:, :4] ^ recovery) @ c4.logical_z[:, c4.n :].T % 2)
+
+
+import numft
+
+c4 = numft.css.Code422()
+c6 = numft.css.Code622()
+l1 = c4
+l2 = c6.concat({(0, 1): c4, (2, 3): c4, (4, 5): c4})
+
+lz = np.asarray(l1.expand_lz(), dtype=np.uint8)
+hz = np.asarray(l1.all_hz(), dtype=np.uint8)
+
+decoder = numft.css.PoulinDecoder("X", l1)
+decoder.set_physical_rate(er)
+measurement = mea_end[:, :4]
+syndrome = (measurement @ hz.T) % 2
+recovery, _ = decoder.decode_syndrome(syndrome)
+recovery = np.asarray(recovery, dtype=np.uint8)
+print(((measurement + recovery) % 2) @ lz.T % 2)
