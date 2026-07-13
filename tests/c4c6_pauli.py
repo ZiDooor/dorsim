@@ -177,7 +177,7 @@ def concat_code(parent: CSSCode, children) -> CSSCode:
     )
 
 
-class decoder:
+class KnillDecoder:
     ERASURE = -1
 
     def decode_qp(self, measurement_flips: np.ndarray) -> np.ndarray:
@@ -274,7 +274,9 @@ class PoulinDecoder:
         self.p = float(p)
         self.XZ = XZ
         self.code = code
-        self.check = self._measurement_check(code)
+        n = code.n
+        self.check = code.stabilizers[:, n:] if self.XZ == "X" else code.stabilizers[:, :n]
+        self.check = self.check[np.any(self.check, axis=1)].astype(np.uint8)
         self.decode_check, self.decode_logical = self._side_matrices_for_code(code)
         self._table_cache = {}
 
@@ -288,28 +290,18 @@ class PoulinDecoder:
 
     def decode_syndrome(self, syndrome: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
         s = np.asarray(syndrome, dtype=np.uint8)
-        was_1d = s.ndim == 1
-        if was_1d:
-            s = s[None, :]
         assert s.ndim == 2 and s.shape[1] == (self.code.n - self.code.k) // 2
 
         log_prob, recovery_options = self._decode_syndrome_node(s, self.code)
         best_logical = np.argmax(log_prob, axis=1)
         recovery = recovery_options[np.arange(s.shape[0]), best_logical].astype(np.uint8)
-        if was_1d:
-            return recovery[0], {-1: log_prob[0]}
         return recovery, {-1: log_prob}
 
     def decode_measurement(self, measurement_flips: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
         m = np.asarray(measurement_flips, dtype=np.uint8)
-        was_1d = m.ndim == 1
-        if was_1d:
-            m = m[None, :]
         assert m.ndim == 2 and m.shape[1] == self.code.n
         syndrome = (m @ self.check.T) % 2
         recovery, prob = self.decode_syndrome(syndrome)
-        if was_1d:
-            return recovery, prob
         return recovery, prob
 
     def decode_code(
@@ -332,12 +324,14 @@ class PoulinDecoder:
             log_prob = data["prob"][syn]
             recovery_options = data["recovery"][syn]
             return log_prob, recovery_options
-
+ 
         data = self._local_table(code.parent)
         parent_width = data["check"].shape[0]
+        parent_syndrome = syndrome[:, :parent_width]
+        syn = _bits_to_index(parent_syndrome)
         child_probs = []
         child_recoveries = []
-        child_offset = 0
+        child_offset = parent_width
         for child in code.children:
             child_width = (child.n - child.k) // 2
             prob, recovery_options = self._decode_syndrome_node(
@@ -347,15 +341,12 @@ class PoulinDecoder:
             child_probs.append(prob)
             child_recoveries.append(recovery_options)
             child_offset += child_width
-        parent_syndrome = syndrome[:, child_offset : child_offset + parent_width]
-        syn = _bits_to_index(parent_syndrome)
         probs = np.stack(child_probs, axis=1)
         local_ops = data["local_ops"][syn]
         x3 = np.zeros((syndrome.shape[0], data["logical_list"].shape[0], data["check_list"].shape[0]), dtype=np.float64)
         batch = np.arange(syndrome.shape[0])[:, None, None]
-        logical_offsets = np.cumsum([0] + [child.k for child in code.children])
         for child_i, child in enumerate(code.children):
-            sl = slice(logical_offsets[child_i], logical_offsets[child_i + 1])
+            sl = slice(2 * child_i, 2 * child_i + 2)
             child_logical = _bits_to_index(local_ops[..., sl])
             x3 += probs[batch, child_i, child_logical]
         log_prob = scipy.special.logsumexp(x3, axis=2)
@@ -366,7 +357,7 @@ class PoulinDecoder:
         for parent_logical in range(data["logical_list"].shape[0]):
             offset = 0
             for child_i, child in enumerate(code.children):
-                sl = slice(logical_offsets[child_i], logical_offsets[child_i + 1])
+                sl = slice(2 * child_i, 2 * child_i + 2)
                 desired = _bits_to_index(local_ops[np.arange(syndrome.shape[0]), parent_logical, best_stabilizer[:, parent_logical], sl])
                 recovery_options[:, parent_logical, offset : offset + child.n] = child_recoveries[child_i][
                     np.arange(syndrome.shape[0]), desired
@@ -385,29 +376,6 @@ class PoulinDecoder:
         check = check[np.any(check, axis=1)]
         return check.astype(np.uint8), logical.astype(np.uint8)
 
-    def _measurement_check(self, code: CSSCode) -> np.ndarray:
-        n = code.n
-        if not code.children:
-            check = code.stabilizers[:, n:] if self.XZ == "X" else code.stabilizers[:, :n]
-            return check[np.any(check, axis=1)].astype(np.uint8)
-
-        rows = []
-        offset = 0
-        for child in code.children:
-            child_check = self._measurement_check(child)
-            if child_check.size:
-                embedded = np.zeros((child_check.shape[0], n), dtype=np.uint8)
-                embedded[:, offset : offset + child.n] = child_check
-                rows.append(embedded)
-            offset += child.n
-
-        lifted_parent_rows = code.stabilizers[: code.parent.stabilizers.shape[0]]
-        parent_check = lifted_parent_rows[:, n:] if self.XZ == "X" else lifted_parent_rows[:, :n]
-        parent_check = parent_check[np.any(parent_check, axis=1)]
-        if parent_check.size:
-            rows.append(parent_check.astype(np.uint8))
-        return np.vstack(rows).astype(np.uint8) if rows else np.zeros((0, n), dtype=np.uint8)
-
     def _local_table(self, code: CSSCode) -> dict[str, np.ndarray]:
         key = id(code)
         if key in self._table_cache:
@@ -423,8 +391,8 @@ class PoulinDecoder:
         score = np.log(self.p) * weight + np.log1p(-self.p) * (local_ops.shape[3] - weight)
         prob = scipy.special.logsumexp(score, axis=2)
         prob -= scipy.special.logsumexp(prob, axis=1, keepdims=True)
-        best_stabilizer = np.argmax(score, axis=2)
-        recovery = local_ops[
+        best_stabilizer = np.argmax(score, axis=2) # based on syndrome and logical class, which stabilizer choice is best, return the index of the stabilizer choice
+        recovery = local_ops[ # ?
             np.arange(local_ops.shape[0])[:, None],
             np.arange(local_ops.shape[1])[None, :],
             best_stabilizer,
@@ -449,33 +417,6 @@ class PoulinDecoder:
             if self.XZ == "X":
                 return np.array([[1, 1, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0]], dtype=np.uint8)
             return np.array([[0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 1]], dtype=np.uint8)
-        return np.array(
-            [self._solve_gf2(check, target) for target in np.eye(check.shape[0], dtype=np.uint8)],
-            dtype=np.uint8,
-        )
-
-    def _solve_gf2(self, check: np.ndarray, target: np.ndarray) -> np.ndarray:
-        a = np.concatenate([check.copy(), target[:, None].astype(np.uint8)], axis=1)
-        row = 0
-        pivots = []
-        for col in range(check.shape[1]):
-            pivot = np.flatnonzero(a[row:, col])
-            if pivot.size == 0:
-                continue
-            pivot = row + int(pivot[0])
-            a[[row, pivot]] = a[[pivot, row]]
-            for r in range(a.shape[0]):
-                if r != row and a[r, col]:
-                    a[r] ^= a[row]
-            pivots.append(col)
-            row += 1
-            if row == check.shape[0]:
-                break
-        x = np.zeros(check.shape[1], dtype=np.uint8)
-        for r, col in enumerate(pivots):
-            x[col] = a[r, -1]
-        return x
-
 
 
 def get_c4c6_code(level: int) -> CSSCode:
@@ -687,10 +628,10 @@ def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, 
 
 
 
-shot = 10
+shot = 10000
 er = 0.9
 
-dec = decoder()
+dec = KnillDecoder()
 
 c4 = get_c4()
 c4c6_l2 = get_c4c6_code(2)
@@ -758,20 +699,20 @@ recovery, prob_L = dec_end.decode_syndrome(syndrome)
 print((mea_end[:, :4] ^ recovery) @ c4.logical_z[:, c4.n :].T % 2)
 
 
-import numft
+# import numft
 
-c4 = numft.css.Code422()
-c6 = numft.css.Code622()
-l1 = c4
-l2 = c6.concat({(0, 1): c4, (2, 3): c4, (4, 5): c4})
+# c4 = numft.css.Code422()
+# c6 = numft.css.Code622()
+# l1 = c4
+# l2 = c6.concat({(0, 1): c4, (2, 3): c4, (4, 5): c4})
 
-lz = np.asarray(l1.expand_lz(), dtype=np.uint8)
-hz = np.asarray(l1.all_hz(), dtype=np.uint8)
+# lz = np.asarray(l1.expand_lz(), dtype=np.uint8)
+# hz = np.asarray(l1.all_hz(), dtype=np.uint8)
 
-decoder = numft.css.PoulinDecoder("X", l1)
-decoder.set_physical_rate(er)
-measurement = mea_end[:, :4]
-syndrome = (measurement @ hz.T) % 2
-recovery, _ = decoder.decode_syndrome(syndrome)
-recovery = np.asarray(recovery, dtype=np.uint8)
-print(((measurement + recovery) % 2) @ lz.T % 2)
+# decoder = numft.css.PoulinDecoder("X", l1)
+# decoder.set_physical_rate(er)
+# measurement = mea_end[:, :4]
+# syndrome = (measurement @ hz.T) % 2
+# recovery, _ = decoder.decode_syndrome(syndrome)
+# recovery = np.asarray(recovery, dtype=np.uint8)
+# print(((measurement + recovery) % 2) @ lz.T % 2)
