@@ -180,6 +180,9 @@ def concat_code(parent: CSSCode, children) -> CSSCode:
 class KnillDecoder:
     ERASURE = -1
 
+    def __init__(self, seed: int | None = None):
+        self.rng = np.random.default_rng(seed)
+
     def decode_qp(self, measurement_flips: np.ndarray) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         assert m.shape[1] == 2
@@ -237,28 +240,41 @@ class KnillDecoder:
         logical[keep, 1] = b2[keep] ^ c1[keep]
         return logical
 
-    def decode_code(self, measurement_flips: np.ndarray, code: CSSCode) -> np.ndarray:
+    def decode_code(
+        self,
+        measurement_flips: np.ndarray,
+        code: CSSCode,
+        final: bool = False,
+    ) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         assert m.shape[1] == code.n
         if code.name == "Qp" and not code.children:
-            return self.decode_qp(m)
-        if code.name == "C4" and not code.children:
-            return self.decode_c4(m)
+            logical = self.decode_qp(m)
+        elif code.name == "C4" and not code.children:
+            logical = self.decode_c4(m)
+        else:
+            assert len(code.children) == 3
+            child_results = []
+            offset = 0
+            for child in code.children:
+                child_results.append(
+                    self.decode_code(m[:, offset : offset + child.n], child)
+                )
+                offset += child.n
+            child_logicals = np.stack(child_results, axis=1)
+            logical = self.decode_c6_children(child_logicals)
 
-        assert len(code.children) == 3
-        child_results = []
-        offset = 0
-        for child in code.children:
-            child_results.append(self.decode_code(m[:, offset : offset + child.n], child))
-            offset += child.n
-        child_logicals = np.stack(child_results, axis=1)
-        return self.decode_c6_children(child_logicals)
+        if final: # 0/1 for 50/50 probability
+            erased = np.all(logical == self.ERASURE, axis=1)
+            logical[erased] = self.rng.integers(0, 2, size=(erased.sum(), 2))
+            logical = logical.astype(np.uint8)
+        return logical
 
     def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         code = get_c4c6_code(level)
         assert m.shape[1] == code.n
-        return self.decode_code(m, code)
+        return self.decode_code(m, code, final=True)
 
 
 def _bits_to_index(bits: np.ndarray) -> np.ndarray:
@@ -548,11 +564,11 @@ def get_circuit_tele(level, err):
         .depolarize2(np.column_stack((ind_q[:n_q], ind_q[4*n_q:5*n_q])).ravel(), err)
         .cx(np.column_stack((ind_q[2*n_q:3*n_q], ind_q[6*n_q:7*n_q])).ravel())
         .depolarize2(np.column_stack((ind_q[2*n_q:3*n_q], ind_q[6*n_q:7*n_q])).ravel(), err)
-        .h_log(level, ind_q[4*n_q:5*n_q])
-        .h_log(level, ind_q[6*n_q:7*n_q])
-        .m(ind_q[:n_q]) # measure X errors
+        .h_log(level, ind_q[:n_q])
+        .h_log(level, ind_q[2*n_q:3*n_q])
+        .m(ind_q[:n_q]) # measure Z errors
         .m(ind_q[2*n_q:3*n_q])
-        .m(ind_q[4*n_q:5*n_q]) # measure Z errors
+        .m(ind_q[4*n_q:5*n_q]) # measure X errors
         .m(ind_q[6*n_q:7*n_q])
     )
 
@@ -628,77 +644,87 @@ def get_PFrame_l2_bell(shots, circuits: list[Circuit]): # [Circuit] are cir_l1, 
 
 
 
-shot = 10000
-er = 0.9
+def run_level1(shots, noise):
+    shot = shots
+    er = noise
+    dec = KnillDecoder()
 
-dec = KnillDecoder()
+    c4 = get_c4()
+    c4c6_l2 = get_c4c6_code(2)
 
-c4 = get_c4()
-c4c6_l2 = get_c4c6_code(2)
+    logx_l1_1, logx_l1_2 = c4.logical_x[:, :4]
+    logz_l1_1, logz_l1_2 = c4.logical_z[:, 4:]
+    logx_l2_1, logx_l2_2 = c4c6_l2.logical_x[:, :12]
+    logz_l2_1, logz_l2_2 = c4c6_l2.logical_z[:, 12:]
 
-logx_l1_1, logx_l1_2 = c4.logical_x[:, :4]
-logz_l1_1, logz_l1_2 = c4.logical_z[:, :4]
-logx_l2_1, logx_l2_2 = c4c6_l2.logical_x[:, :12]
-logz_l2_1, logz_l2_2 = c4c6_l2.logical_z[:, :12]
+    cir_l1_i = get_circuit_c4(0)
+    cir_l1_bell_i = get_circuit_c4c6_bell(1, 0)
+    cir_l2_p1_i = get_circuit_c4c6_p1(2, 0)
+    cir_l2_p2_i = get_circuit_c4c6_p2(2, 0)
+    cir_l2_bell_i = get_circuit_c4c6_bell(2, 0)
 
-cir_l1_i = get_circuit_c4(0)
-cir_l1_bell_i = get_circuit_c4c6_bell(1, 0)
-cir_l2_p1_i = get_circuit_c4c6_p1(2, 0)
-cir_l2_p2_i = get_circuit_c4c6_p2(2, 0)
-cir_l2_bell_i = get_circuit_c4c6_bell(2, 0)
+    cir_l1 = get_circuit_c4(er)
+    cir_l1_bell = get_circuit_c4c6_bell(1, er)
+    cir_l2_p1 = get_circuit_c4c6_p1(2, er)
+    cir_l2_p2 = get_circuit_c4c6_p2(2, er)
+    cir_l2_bell = get_circuit_c4c6_bell(2, er)
+    cir_l2_bell_tele = get_circuit_c4c6_tele(2, er)
 
-cir_l1 = get_circuit_c4(er)
-cir_l1_bell = get_circuit_c4c6_bell(1, er)
-cir_l2_p1 = get_circuit_c4c6_p1(2, er)
-cir_l2_p2 = get_circuit_c4c6_p2(2, er)
-cir_l2_bell = get_circuit_c4c6_bell(2, er)
-cir_l2_bell_tele = get_circuit_c4c6_tele(2, er)
-
-# pframe_l2_bell = get_PFrame_l2_bell(shots=shot, circuits=[cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2, cir_l2_bell, cir_l2_bell_tele])
-
-
-# level 1
-n_q = 4
-ind_q = np.arange(16)
-# Dep error
-cir_a = (
-    C4C6Circuit(16)
-    .depolarize2(np.column_stack((ind_q[:4], ind_q[8:12])).ravel(), er)
-)
-pframe_l1 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i])], circuit=cir_a).run()
-# ECT
-cir_b = get_circuit_tele(1, er)
-pframe_l1_ect = PauliFrame.bunch([pframe_l1, get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell])], circuit=cir_b).run()
-mea = pframe_l1_ect.samples
-rex = np.concatenate([dec.decode_code(mea[:, i*4:(i+1)*4], c4) for i in range(2)], axis=1)
-rez = np.concatenate([dec.decode_code(mea[:, (2 + i)*4:(3 + i)*4], c4) for i in range(2)], axis=1)
-mask = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
-# correct
-rex, rez = rex.astype(np.uint8), rez.astype(np.uint8)
-frame_corrected = pframe_l1_ect.frame
-frame_corrected[mask, 5*n_q:6*n_q] ^= ((rex[mask][:, [0]]*logx_l1_1) ^ (rex[mask][:, [1]]*logx_l1_2))
-frame_corrected[mask, 7*n_q:8*n_q] ^= ((rex[mask][:, [2]]*logx_l1_1) ^ (rex[mask][:, [3]]*logx_l1_2))
-frame_corrected[mask, 8*n_q + 5*n_q:8*n_q + 6*n_q] ^= ((rez[mask][:, [0]]*logz_l1_1) ^ (rez[mask][:, [1]]*logz_l1_2))
-frame_corrected[mask, 8*n_q + 7*n_q:8*n_q + 8*n_q] ^= ((rez[mask][:, [2]]*logz_l1_1) ^ (rez[mask][:, [3]]*logz_l1_2))
-# select qubits
-pframe_l1_ect.update(frame=frame_corrected)
-pframe_l1_ect.select_qubits(np.r_[4:8, 12:16, 20:24, 28:32])
-# relabel
-circ_relabel = (
-    Circuit(16)
-    .swap(np.column_stack((ind_q[8:12], ind_q[12:16])).ravel())
-    .swap(np.column_stack((ind_q[4:8], ind_q[12:16])).ravel())
-    .swap(np.column_stack((ind_q[:4], ind_q[4:8])).ravel())
-)
-pframe_l1_ect.update(circuit=circ_relabel).run()
-# measure and decode
-mea_end = pframe_l1_ect.update(circuit=get_circuit_meaNdec(1)).run().samples
-dec_end = PoulinDecoder("X", c4, p=er)
-syndrome = mea_end[:, :4] @ dec_end.check.T % 2
-recovery, prob_L = dec_end.decode_syndrome(syndrome)
-print((mea_end[:, :4] ^ recovery) @ c4.logical_z[:, c4.n :].T % 2)
+    # pframe_l2_bell = get_PFrame_l2_bell(shots=shot, circuits=[cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2, cir_l2_bell, cir_l2_bell_tele])
 
 
+    # level 1
+    n_q = 4
+    ind_q = np.arange(16)
+    # Dep error
+    cir_a = (
+        C4C6Circuit(16)
+        .depolarize2(np.column_stack((ind_q[:4], ind_q[8:12])).ravel(), er)
+    )
+    pframe_l1 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i])], circuit=cir_a).run()
+    # ECT
+    cir_b = get_circuit_tele(1, er)
+    pframe_l1_ect = PauliFrame.bunch([pframe_l1, get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell])], circuit=cir_b).run()
+    mea = pframe_l1_ect.samples
+    rez = np.concatenate([dec.decode_code(mea[:, i*4:(i+1)*4], c4, True) for i in range(2)], axis=1)
+    rex = np.concatenate([dec.decode_code(mea[:, (2 + i)*4:(3 + i)*4], c4, True) for i in range(2)], axis=1)
+    # correct
+    frame_corrected = pframe_l1_ect.frame
+    frame_corrected[:, 5*n_q:6*n_q] ^= ((rex[:, [0]]*logx_l1_1) ^ (rex[:, [1]]*logx_l1_2))
+    frame_corrected[:, 7*n_q:8*n_q] ^= ((rex[:, [2]]*logx_l1_1) ^ (rex[:, [3]]*logx_l1_2))
+    frame_corrected[:, 8*n_q + 5*n_q:8*n_q + 6*n_q] ^= ((rez[:, [0]]*logz_l1_1) ^ (rez[:, [1]]*logz_l1_2))
+    frame_corrected[:, 8*n_q + 7*n_q:8*n_q + 8*n_q] ^= ((rez[:, [2]]*logz_l1_1) ^ (rez[:, [3]]*logz_l1_2))
+    # select qubits
+    pframe_l1_ect.update(frame=frame_corrected)
+    pframe_l1_ect.select_qubits(np.r_[4:8, 12:16, 20:24, 28:32])
+    # relabel
+    circ_relabel = (
+        Circuit(16)
+        .swap(np.column_stack((ind_q[8:12], ind_q[12:16])).ravel())
+        .swap(np.column_stack((ind_q[4:8], ind_q[12:16])).ravel())
+        .swap(np.column_stack((ind_q[:4], ind_q[4:8])).ravel())
+    )
+    pframe_l1_ect.update(circuit=circ_relabel).run()
+    # measure and decode
+    mea_end = pframe_l1_ect.update(circuit=get_circuit_meaNdec(1)).run().samples
+    dec_end = PoulinDecoder("X", c4, p=er)
+
+    mea_re = mea_end.reshape(-1, 4)
+    syndrome = mea_re @ dec_end.check.T % 2
+    recovery, prob_L = dec_end.decode_syndrome(syndrome)
+    re = (mea_re ^ recovery) @ c4.logical_z[:, c4.n :].T % 2
+    re = re.reshape(mea_end.shape[0], -1)
+    num_err = re.any(axis=1).sum()
+
+    return float(num_err/shot)
+
+
+shot = 100000
+err_list = np.linspace(0.002, 0.01, 10)
+ler_list = [run_level1(shot, err) for err in err_list]
+
+print(err_list.tolist())
+print(ler_list)
 # import numft
 
 # c4 = numft.css.Code422()
