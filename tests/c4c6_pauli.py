@@ -114,21 +114,10 @@ def get_qp() -> CSSCode:
     )
 
 
-def _logical_z_for_parent_row(child: CSSCode, logical: int, use_alternate_first_z: bool) -> np.ndarray:
-    row = child.logical_z[logical]
-    if use_alternate_first_z and logical == 0:
-        for stabilizer in child.stabilizers:
-            if not np.any(stabilizer[:child.n]):
-                return row ^ stabilizer
-    return row
-
-
 def _lift_parent_row(
     row: np.ndarray,
     children: tuple[CSSCode, ...],
     total_n: int,
-    *,
-    use_alternate_first_z: bool = False,
 ) -> np.ndarray:
     parent_n = row.size // 2
     out = np.zeros(2 * total_n, dtype=np.uint8)
@@ -142,7 +131,7 @@ def _lift_parent_row(
         if row[q]:
             out ^= embed_bsr(child.logical_x[logical], offset, total_n)
         if row[parent_n + q]:
-            out ^= embed_bsr(_logical_z_for_parent_row(child, logical, use_alternate_first_z), offset, total_n)
+            out ^= embed_bsr(child.logical_z[logical], offset, total_n)
     return out
 
 
@@ -151,15 +140,13 @@ def concat_code(parent: CSSCode, children) -> CSSCode:
     assert sum(child.k for child in children) == parent.n
     total_n = sum(child.n for child in children)
 
-    stabilizers = [
-        _lift_parent_row(row, children, total_n, use_alternate_first_z=True)
-        for row in parent.stabilizers
-    ]
+    stabilizers = []
     offset = 0
     for child in children:
         for row in child.stabilizers:
             stabilizers.append(embed_bsr(row, offset, total_n))
         offset += child.n
+    stabilizers.extend(_lift_parent_row(row, children, total_n) for row in parent.stabilizers)
     stabilizers = np.array(stabilizers, dtype=np.uint8) if stabilizers else np.zeros((0, 2 * total_n), dtype=np.uint8)
 
     return CSSCode(
@@ -168,10 +155,7 @@ def concat_code(parent: CSSCode, children) -> CSSCode:
         k=parent.k,
         stabilizers=stabilizers,
         logical_x=np.array([_lift_parent_row(row, children, total_n) for row in parent.logical_x], dtype=np.uint8),
-        logical_z=np.array(
-            [_lift_parent_row(row, children, total_n, use_alternate_first_z=True) for row in parent.logical_z],
-            dtype=np.uint8,
-        ),
+        logical_z=np.array([_lift_parent_row(row, children, total_n) for row in parent.logical_z], dtype=np.uint8),
         children=children,
         parent=parent,
     )
@@ -343,11 +327,9 @@ class PoulinDecoder:
  
         data = self._local_table(code.parent)
         parent_width = data["check"].shape[0]
-        parent_syndrome = syndrome[:, :parent_width]
-        syn = _bits_to_index(parent_syndrome)
         child_probs = []
         child_recoveries = []
-        child_offset = parent_width
+        child_offset = 0
         for child in code.children:
             child_width = (child.n - child.k) // 2
             prob, recovery_options = self._decode_syndrome_node(
@@ -357,6 +339,8 @@ class PoulinDecoder:
             child_probs.append(prob)
             child_recoveries.append(recovery_options)
             child_offset += child_width
+        parent_syndrome = syndrome[:, child_offset : child_offset + parent_width]
+        syn = _bits_to_index(parent_syndrome)
         probs = np.stack(child_probs, axis=1)
         local_ops = data["local_ops"][syn]
         x3 = np.zeros((syndrome.shape[0], data["logical_list"].shape[0], data["check_list"].shape[0]), dtype=np.float64)
@@ -364,11 +348,11 @@ class PoulinDecoder:
         for child_i, child in enumerate(code.children):
             sl = slice(2 * child_i, 2 * child_i + 2)
             child_logical = _bits_to_index(local_ops[..., sl])
-            x3 += probs[batch, child_i, child_logical]
+            x3 += probs[batch, child_i, child_logical] # x3[syndrome, logical_class, stabilizer_choice] = log probability of child logical class given syndrome and stabilizer choice
         log_prob = scipy.special.logsumexp(x3, axis=2)
         log_prob -= scipy.special.logsumexp(log_prob, axis=1, keepdims=True)
 
-        best_stabilizer = np.argmax(x3, axis=2)
+        best_stabilizer = np.argmax(x3, axis=2) # best_stabilizer[syndrome, logical_class] = index of stabilizer choice that maximizes log probability of child logical class given syndrome and stabilizer choice
         recovery_options = np.zeros((syndrome.shape[0], data["logical_list"].shape[0], code.n), dtype=np.uint8)
         for parent_logical in range(data["logical_list"].shape[0]):
             offset = 0
@@ -406,13 +390,9 @@ class PoulinDecoder:
         weight = local_ops.sum(axis=3)
         score = np.log(self.p) * weight + np.log1p(-self.p) * (local_ops.shape[3] - weight)
         prob = scipy.special.logsumexp(score, axis=2)
-        prob -= scipy.special.logsumexp(prob, axis=1, keepdims=True)
-        best_stabilizer = np.argmax(score, axis=2) # based on syndrome and logical class, which stabilizer choice is best, return the index of the stabilizer choice
-        recovery = local_ops[ # ?
-            np.arange(local_ops.shape[0])[:, None],
-            np.arange(local_ops.shape[1])[None, :],
-            best_stabilizer,
-        ]
+        prob -= scipy.special.logsumexp(prob, axis=1, keepdims=True) # prob[syndrome, logical_class] = log probability of logical class given syndrome
+        best_stabilizer = np.argmax(score, axis=2) # best_stabilizer[syndrome, logical_class] = index of stabilizer choice that maximizes score
+        recovery = local_ops[np.arange(local_ops.shape[0])[:, None], np.arange(local_ops.shape[1])[None, :], best_stabilizer] # recovery[syndrome, logical_class], the best recovery for each syndrome and logical class
         data = {
             "check": check,
             "logical_list": logical_list,
@@ -798,9 +778,8 @@ logz_l2_1, logz_l2_2 = c4c6_l2.logical_z[:, 12:]
 
 err_list = np.linspace(0.002, 0.01, 10)
 # err_list = np.linspace(0.01, 0.012, 1)
-ler_list = [run_level1(shot, err) for err in err_list]
-# ler_list = [run_level2(shot, err) for err in err_list]
+# ler_list = [run_level1(shot, err) for err in err_list]
+ler_list = [run_level2(shot, err) for err in err_list]
 
 print(err_list.tolist())
 print(ler_list)
-
