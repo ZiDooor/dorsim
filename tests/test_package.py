@@ -7,8 +7,40 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from dorsim import Circuit, Operation, PauliFrame, TableauSim, target_rec
+from dorsim import (
+    CSSCode,
+    Circuit,
+    KnillDecoder,
+    Operation,
+    PauliFrame,
+    PoulinDecoder,
+    TableauSim,
+    concat_code,
+    get_c4,
+    get_c4c6_code,
+    get_c6,
+    get_qp,
+    target_rec,
+)
 from dorsim.pauli import bits_from_code, code_from_bits, local_conjugation_map
+
+
+def test_css_codes_and_decoders_are_public_package_api():
+    c4 = get_c4()
+    c6 = get_c6()
+    qp = get_qp()
+    full = concat_code(c6, [c4, c4, c4])
+    partial = concat_code(c6, [qp, c4, c4])
+
+    assert isinstance(c4, CSSCode)
+    assert (c4.n, c6.n, qp.n, full.n, partial.n) == (4, 6, 2, 12, 10)
+    assert np.array_equal(get_c4c6_code(2).stabilizers, full.stabilizers)
+
+    measurements = np.zeros((2, c4.n), dtype=np.uint8)
+    assert KnillDecoder().decode_code(measurements, c4).shape == (2, 2)
+    recovery, probabilities = PoulinDecoder("X", c4).decode_measurement(measurements)
+    assert recovery.shape == (2, c4.n)
+    assert probabilities[-1].shape == (2, 4)
 
 
 def test_operation_storage_splits_iterable_targets():
