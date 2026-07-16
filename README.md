@@ -2,6 +2,14 @@
 
 Python implementation of an inverse stabilizer tableau reference simulator and a Pauli-frame sampler.
 
+## Installation
+
+You may have conda or other environment manager installed, activate your environment firstly, then cd to the project root directory and run:
+
+```bash
+pip install -e .
+```
+
 The original standalone script is kept in `inverse_tableau_sim.py`. The reusable package lives under `src/dorsim`.
 
 ```python

@@ -8,3 +8,5 @@ __pycache__/
 inverse_tableau_sim.py
 tests/test.ipynb
 tests/test.py
+
+*.egg-info/
