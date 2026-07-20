@@ -2,6 +2,8 @@ import itertools
 import numpy as np
 from tqdm import tqdm
 from dorsim import (
+    Circuit,
+    PauliFrame,
     BiasedPoulinDecoder,
     CSSCode,
     StabilizerCode,
@@ -9,32 +11,7 @@ from dorsim import (
 )
 import matplotlib.pyplot as plt
 
-def get_depolarizing_error(n:int, p:float, batch_size:int|None=None):
-    np_rng = np.random.default_rng()
-    assert 0<=p<=1
-    isone = batch_size is None
-    if isone:
-        batch_size = 1
-    tmp0 = np_rng.choice(4, p=np.array([1-p, p/3, p/3, p/3]), size=(batch_size,n))
-    # 0123: IZXY
-    ret = np.concatenate([tmp0//2, tmp0%2], axis=1).astype(np.uint8)
-    if isone:
-        ret = ret[0]
-    return ret
-
 def matmul_gf4(np0, np1):
-    """Matrix multiplication in GF(4) symplectic representation.
-
-    Computes matrix product respecting symplectic/GF(4) structure where
-    matrices are stored as [X part | Z part].
-
-    Args:
-        np0: Binary matrix, shape (..., 2n), dtype=np.uint8.
-        np1: Binary matrix, shape (2n,) or (..., 2n, k), dtype=np.uint8.
-
-    Returns:
-        np.ndarray: Product matrix, preserving symplectic structure.
-    """
     assert (np0.dtype==np.uint8) and (np1.dtype==np.uint8)
     assert np0.shape[-1]%2==0
     assert np0.shape[-1] == np1.shape[(0 if (np1.ndim==1) else -2)]
@@ -58,7 +35,7 @@ def steane_concat_capacity():
     level_list = [1, 2, 3]
     
     num_sample = int(1e5)
-    plist = np.linspace(0.1, 0.2, 10)
+    plist = np.linspace(0.08, 0.12, 6)
     batch_size = 512
 
     num_fail_list = []
@@ -67,18 +44,61 @@ def steane_concat_capacity():
         code = code_list[level_i-1]
         stab_list = code.stabilizers
         logical_list = np.concatenate([code.logical_x, code.logical_z], axis=0)
-        decoder = BiasedPoulinDecoder(code, 1/4, 1/4, 1/4)
+
+        decoder_tele = BiasedPoulinDecoder(code, 1/4, 1/4, 1/4)
+        decoder_end = BiasedPoulinDecoder(code, 1/4, 1/4, 1/4)
         for p in plist:
             num_fail = 0
             num_total = 0
-            decoder.set_error_model(p/3, p/3, p/3)
+
+            p_a = p
+            p_b = p*3/4
+            r_a = 1 - 4*p_a/3
+            r_b = 1 - 4*p_b/3
+
+            n_q = code.n
+
+            # ind_q = np.arange(n_q)
+            # circ = (
+            #     Circuit(n_q)
+            #     .depolarize1(ind_q[:n_q], p)
+            # )
+            
+            ind_q = np.arange(3*n_q)
+            circ = (
+                Circuit(3*n_q)
+                .depolarize1(ind_q[:n_q], p_a) # depolarizing channel, input state
+                .depolarize1(ind_q[n_q:], p_b) # depolarizing channel, Bell pair, maybe 1% smaller?
+                .cx(np.column_stack((ind_q[n_q:2*n_q], ind_q[2*n_q:])).ravel())
+                .cx(np.column_stack((ind_q[:n_q], ind_q[n_q:2*n_q])).ravel())
+                .h(ind_q[:n_q])
+                .m(ind_q[n_q:2*n_q]) # measure X errors
+                .m(ind_q[:n_q]) # measure Z errors
+            )
+
             for _ in tqdm(range(num_sample//batch_size), desc=f'level {level_i} p={p:.3f}'):
-                error = get_depolarizing_error(code.n, p, batch_size)
-                syndrome = matmul_gf4(error, stab_list.T)
-                recovery, prob_L = decoder.decode(syndrome)
-                tmp0 = (error + recovery) % 2
-                # num_fail = num_fail + int(code.commute_with_logical(tmp0).max()==1)
-                num_fail = num_fail + int(matmul_gf4(tmp0, logical_list.T).max(axis=1).sum())
+
+                pframe = PauliFrame(circuit=circ, shots=batch_size)
+                pframe.frame.fill(0) # turn it into code capacity simulation
+                pframe.run()
+                error = pframe.samples
+                pframe.select_qubits(ind_q[2*n_q:]) # select all qubits
+                frame = pframe.frame
+                ## Knill correction
+                syn0 = matmul_gf4(error, stab_list.T)
+                # decoder_tele.set_error_model(p/3, p/3, p/3) ########### set the ECT error distribution
+                decoder_tele.set_error_model((1 - r_a*r_b)/4, (1 - r_a*r_b)/4, (1 + r_a*r_b - 2*r_a*r_b**2)/4)
+                re0, prob_L = decoder_tele.decode(syn0)
+                tmp0 = (frame + (error + re0)) % 2
+                ## Count the failures
+                syn1 = matmul_gf4(tmp0, stab_list.T)
+                # decoder_end.set_error_model(p/3, p/3, p/3) ########### set the output state distribution
+                decoder_end.set_error_model((1 - r_a*r_b**2)/4, (1 - 2*r_a*r_b + r_a*r_b**2)/4, (1 - r_a*r_b**2)/4)
+                re1, prob_L = decoder_end.decode(syn1)
+                tmp1 = (tmp0 + re1) % 2
+
+                check_list = np.concatenate([stab_list, logical_list], axis=0)
+                num_fail = num_fail + int(matmul_gf4(tmp1, check_list.T).max(axis=1).sum())
                 num_total = num_total + tmp0.shape[0]
             num_fail_list.append(num_fail)
             num_total_list.append(num_total)
@@ -91,6 +111,8 @@ def steane_concat_capacity():
         std_err = (logical_errors*(1-logical_errors)/num_total_list[ind0])**0.5
         ax.errorbar(plist, logical_errors, yerr=std_err, label="level={}".format(level_list[ind0]))
     ax.plot(plist, plist, '-.', label='y=x')
+    # ax.set_xlim(0, 5)
+    ax.set_ylim(0.1, 0.7)
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.grid()
