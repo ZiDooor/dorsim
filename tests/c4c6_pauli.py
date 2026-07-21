@@ -1,431 +1,143 @@
-import itertools
-import sys
-from pathlib import Path
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
-import scipy.special
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from dorsim import Circuit, PauliFrame, target_rec
-
-
-@dataclass
-class CSSCode:
-    name: str
-    n: int
-    k: int
-    stabilizers: np.ndarray
-    logical_x: np.ndarray
-    logical_z: np.ndarray
-    children: tuple["CSSCode", ...] = ()
-    parent: "CSSCode | None" = None
-
-    def get_lx(self) -> np.ndarray:
-        return self.logical_x[:, :self.n]
-    
-    def get_lz(self) -> np.ndarray:
-        return self.logical_z[:, self.n:]
+from dorsim import (
+    Circuit,
+    KnillDecoder,
+    PauliFrame,
+    PoulinDecoder,
+    concat_code,
+    get_c4,
+    get_c4c6_code,
+    get_c6,
+    target_rec,
+)
 
 
-def embed_bsr(row: np.ndarray, offset: int, total_n: int) -> np.ndarray:
-    local_n = row.size // 2
-    out = np.zeros(2 * total_n, dtype=np.uint8)
-    out[offset : offset + local_n] = row[:local_n]
-    out[total_n + offset : total_n + offset + local_n] = row[local_n:]
-    return out
+@dataclass(frozen=True)
+class StateCacheKey:
+    kind: str
+    level: int
+    error_rate: float
 
 
-def get_c4() -> CSSCode:
-    return CSSCode(
-        name="C4",
-        n=4,
-        k=2,
-        stabilizers=np.array(
-            [
-                [1, 1, 1, 1, 0, 0, 0, 0],
-                [0, 0, 0, 0, 1, 1, 1, 1],
-            ],
-            dtype=np.uint8,
-        ),
-        logical_x=np.array(
-            [
-                [1, 1, 0, 0, 0, 0, 0, 0],
-                [0, 1, 0, 1, 0, 0, 0, 0],
-            ],
-            dtype=np.uint8,
-        ),
-        logical_z=np.array(
-            [
-                [0, 0, 0, 0, 1, 0, 1, 0],
-                [0, 0, 0, 0, 0, 0, 1, 1],
-            ],
-            dtype=np.uint8,
-        ),
-    )
+class PreparedFrameCache:
+    """Chunked FIFO cache of accepted, unconsumed Pauli-frame rows."""
 
+    def __init__(
+        self,
+        batch_size: int = 10000,
+        max_batch_size: int = 100000,
+        max_empty_batches: int = 10,
+    ):
+        self.batch_size = int(batch_size)
+        self.max_batch_size = int(max_batch_size)
+        self.max_empty_batches = int(max_empty_batches)
+        self._chunks = {}
+        self._offsets = {}
+        self._available = {}
+        self._generated = {}
+        self._accepted = {}
 
-def get_c6() -> CSSCode:
-    return CSSCode(
-        name="C6",
-        n=6,
-        k=2,
-        stabilizers=np.array(
-            [
-                [1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
-                [1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1],
-                [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1],
-            ],
-            dtype=np.uint8,
-        ),
-        logical_x=np.array(
-            [
-                [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                [1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-            ],
-            dtype=np.uint8,
-        ),
-        logical_z=np.array(
-            [
-                [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1],
-                [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0],
-            ],
-            dtype=np.uint8,
-        ),
-    )
+    def available(self, key: StateCacheKey) -> int:
+        return self._available.get(key, 0)
 
+    def put(self, key: StateCacheKey, frame: np.ndarray) -> None:
+        rows = np.asarray(frame, dtype=np.uint8)
+        if rows.shape[0] == 0:
+            return
+        self._chunks.setdefault(key, deque()).append(rows.copy())
+        self._offsets.setdefault(key, 0)
+        self._available[key] = self.available(key) + rows.shape[0]
 
-def get_qp() -> CSSCode:
-    return CSSCode(
-        name="Qp",
-        n=2,
-        k=2,
-        stabilizers=np.zeros((0, 4), dtype=np.uint8),
-        logical_x=np.array(
-            [
-                [1, 0, 0, 0],
-                [0, 1, 0, 0],
-            ],
-            dtype=np.uint8,
-        ),
-        logical_z=np.array(
-            [
-                [0, 0, 1, 0],
-                [0, 0, 0, 1],
-            ],
-            dtype=np.uint8,
-        ),
-    )
+    def take(self, key: StateCacheKey, shots: int, circuit: Circuit) -> PauliFrame:
+        shots = int(shots)
+        assert self.available(key) >= shots
+        remaining = shots
+        parts = []
+        chunks = self._chunks.setdefault(key, deque())
+        offset = self._offsets.get(key, 0)
+        while remaining:
+            chunk = chunks[0]
+            count = min(remaining, chunk.shape[0] - offset)
+            parts.append(chunk[offset:offset+count])
+            offset += count
+            remaining -= count
+            if offset == chunk.shape[0]:
+                chunks.popleft()
+                offset = 0
+        self._offsets[key] = offset
+        self._available[key] = self.available(key) - shots
+        rows = np.concatenate(parts, axis=0) if len(parts) > 1 else parts[0].copy()
+        return PauliFrame(circuit, shots=0).update(rows)
 
-
-def _lift_parent_row(
-    row: np.ndarray,
-    children: tuple[CSSCode, ...],
-    total_n: int,
-) -> np.ndarray:
-    parent_n = row.size // 2
-    out = np.zeros(2 * total_n, dtype=np.uint8)
-    physical_offsets = np.cumsum([0] + [child.n for child in children[:-1]])
-    logical_offsets = np.cumsum([0] + [child.k for child in children[:-1]])
-    for q in range(parent_n):
-        child_index = max(i for i, start in enumerate(logical_offsets) if start <= q)
-        child = children[child_index]
-        logical = q - int(logical_offsets[child_index])
-        offset = int(physical_offsets[child_index])
-        if row[q]:
-            out ^= embed_bsr(child.logical_x[logical], offset, total_n)
-        if row[parent_n + q]:
-            out ^= embed_bsr(child.logical_z[logical], offset, total_n)
-    return out
-
-
-def concat_code(parent: CSSCode, children) -> CSSCode:
-    children = tuple(children)
-    assert sum(child.k for child in children) == parent.n
-    total_n = sum(child.n for child in children)
-
-    stabilizers = []
-    offset = 0
-    for child in children:
-        for row in child.stabilizers:
-            stabilizers.append(embed_bsr(row, offset, total_n))
-        offset += child.n
-    stabilizers.extend(_lift_parent_row(row, children, total_n) for row in parent.stabilizers)
-    stabilizers = np.array(stabilizers, dtype=np.uint8) if stabilizers else np.zeros((0, 2 * total_n), dtype=np.uint8)
-
-    return CSSCode(
-        name=f"{parent.name}(" + ",".join(child.name for child in children) + ")",
-        n=total_n,
-        k=parent.k,
-        stabilizers=stabilizers,
-        logical_x=np.array([_lift_parent_row(row, children, total_n) for row in parent.logical_x], dtype=np.uint8),
-        logical_z=np.array([_lift_parent_row(row, children, total_n) for row in parent.logical_z], dtype=np.uint8),
-        children=children,
-        parent=parent,
-    )
-
-
-class KnillDecoder:
-    ERASURE = -1
-
-    def __init__(self, seed: int | None = None):
-        self.rng = np.random.default_rng(seed)
-
-    def decode_qp(self, measurement_flips: np.ndarray) -> np.ndarray:
-        m = np.asarray(measurement_flips, dtype=np.uint8)
-        assert m.shape[1] == 2
-        return m.astype(np.int8).copy()
-
-    def decode_c4(self, measurement_flips: np.ndarray) -> np.ndarray:
-        m = np.asarray(measurement_flips, dtype=np.uint8)
-        assert m.shape[1] == 4
-        logical = np.full((m.shape[0], 2), self.ERASURE, dtype=np.int8)
-        parity = np.bitwise_xor.reduce(m, axis=1)
-        keep = parity == 0
-        logical[keep, 0] = m[keep, 0] ^ m[keep, 2]
-        logical[keep, 1] = m[keep, 2] ^ m[keep, 3]
-        return logical
-
-    def decode_c6_children(self, child_logicals: np.ndarray) -> np.ndarray:
-        d = np.asarray(child_logicals, dtype=np.int8).copy()
-        shots = d.shape[0]
-        logical = np.full((shots, 2), self.ERASURE, dtype=np.int8)
-        erased = np.any(d == self.ERASURE, axis=2)
-        erasure_count = erased.sum(axis=1)
-
-        one = erasure_count == 1
-        for erased_child in range(3):
-            mask = one & erased[:, erased_child]
-            if not np.any(mask):
-                continue
-            a1 = d[mask, 0, 0]
-            a2 = d[mask, 0, 1]
-            b1 = d[mask, 1, 0]
-            b2 = d[mask, 1, 1]
-            c1 = d[mask, 2, 0]
-            c2 = d[mask, 2, 1]
-            if erased_child == 0:
-                d[mask, 0, 0] = b2 ^ c1 ^ c2
-                d[mask, 0, 1] = b1 ^ b2 ^ c1
-            elif erased_child == 1:
-                d[mask, 1, 0] = a1 ^ a2 ^ c2
-                d[mask, 1, 1] = a1 ^ c1 ^ c2
+    def get_or_prepare(self, key, shots, circuit, producer) -> PauliFrame:
+        shots = int(shots)
+        empty_batches = 0
+        last_batch = max(self.batch_size, min(shots, self.max_batch_size))
+        while self.available(key) < shots:
+            missing = shots - self.available(key)
+            generated = self._generated.get(key, 0)
+            accepted = self._accepted.get(key, 0)
+            if generated and accepted:
+                rate = accepted / generated
+                batch = int(np.ceil(1.2 * missing / rate))
+            elif empty_batches:
+                batch = 2*last_batch
             else:
-                d[mask, 2, 0] = a2 ^ b1 ^ b2
-                d[mask, 2, 1] = a1 ^ a2 ^ b1
+                batch = max(self.batch_size, missing)
+            batch = min(batch, self.max_batch_size)
+            prepared = producer(batch)
+            accepted_now = prepared.shots
+            self._generated[key] = generated + batch
+            self._accepted[key] = accepted + accepted_now
+            if accepted_now:
+                self.put(key, prepared.frame)
+                empty_batches = 0
+            else:
+                empty_batches += 1
+                if empty_batches >= self.max_empty_batches:
+                    raise RuntimeError(f"preparation repeatedly accepted no states for {key}")
+            last_batch = batch
+        return self.take(key, shots, circuit)
 
-        no_erasure = erasure_count == 0
-        a1 = d[:, 0, 0]
-        a2 = d[:, 0, 1]
-        b1 = d[:, 1, 0]
-        b2 = d[:, 1, 1]
-        c1 = d[:, 2, 0]
-        c2 = d[:, 2, 1]
-        s1_ok = (a1 ^ b2 ^ c1 ^ c2) == 0
-        s2_ok = (a1 ^ a2 ^ b1 ^ c2) == 0
-        keep = one | (no_erasure & s1_ok & s2_ok)
-        logical[keep, 0] = b1[keep] ^ b2[keep] ^ c2[keep]
-        logical[keep, 1] = b2[keep] ^ c1[keep]
-        return logical
-
-    def decode_code(
-        self,
-        measurement_flips: np.ndarray,
-        code: CSSCode,
-        final: bool = False,
-    ) -> np.ndarray:
-        m = np.asarray(measurement_flips, dtype=np.uint8)
-        assert m.shape[1] == code.n
-        if code.name == "Qp" and not code.children:
-            logical = self.decode_qp(m)
-        elif code.name == "C4" and not code.children:
-            logical = self.decode_c4(m)
-        else:
-            assert len(code.children) == 3
-            child_results = []
-            offset = 0
-            for child in code.children:
-                child_results.append(
-                    self.decode_code(m[:, offset : offset + child.n], child)
-                )
-                offset += child.n
-            child_logicals = np.stack(child_results, axis=1)
-            logical = self.decode_c6_children(child_logicals)
-
-        if final: # 0/1 for 50/50 probability
-            erased = np.all(logical == self.ERASURE, axis=1)
-            logical[erased] = self.rng.integers(0, 2, size=(erased.sum(), 2))
-            logical = logical.astype(np.uint8)
-        return logical
-
-    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> np.ndarray:
-        m = np.asarray(measurement_flips, dtype=np.uint8)
-        code = get_c4c6_code(level)
-        assert m.shape[1] == code.n
-        return self.decode_code(m, code, final=True)
-
-
-def _bits_to_index(bits: np.ndarray) -> np.ndarray:
-    bits = np.asarray(bits, dtype=np.uint8)
-    weights = (1 << np.arange(bits.shape[-1] - 1, -1, -1, dtype=np.int64))
-    return (bits.astype(np.int64) * weights).sum(axis=-1)
-
-
-class PoulinDecoder:
-    def __init__(self, XZ: str, code: CSSCode, p: float = 0.01):
-        assert 0 < p < 1
-        assert XZ in {"X", "Z"}
-        self.p = float(p)
-        self.XZ = XZ
-        self.code = code
-        n = code.n
-        self.check = code.stabilizers[:, n:] if self.XZ == "X" else code.stabilizers[:, :n]
-        self.check = self.check[np.any(self.check, axis=1)].astype(np.uint8)
-        self.decode_check, self.decode_logical = self._side_matrices_for_code(code)
-        self._table_cache = {}
-
-    def set_physical_rate(self, p: float) -> None:
-        assert 0 < p < 1
-        self.p = float(p)
-        self._table_cache = {}
-
-    def decode(self, syndrome: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-        return self.decode_syndrome(syndrome)
-
-    def decode_syndrome(self, syndrome: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-        s = np.asarray(syndrome, dtype=np.uint8)
-        assert s.ndim == 2 and s.shape[1] == (self.code.n - self.code.k) // 2
-
-        log_prob, recovery_options = self._decode_syndrome_node(s, self.code)
-        best_logical = np.argmax(log_prob, axis=1)
-        recovery = recovery_options[np.arange(s.shape[0]), best_logical].astype(np.uint8)
-        return recovery, {-1: log_prob}
-
-    def decode_measurement(self, measurement_flips: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-        m = np.asarray(measurement_flips, dtype=np.uint8)
-        assert m.ndim == 2 and m.shape[1] == self.code.n
-        syndrome = (m @ self.check.T) % 2
-        recovery, prob = self.decode_syndrome(syndrome)
-        return recovery, prob
-
-    def decode_code(
-        self,
-        measurement_flips: np.ndarray,
-        code: CSSCode | None = None,
-    ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-        if code is not None and code is not self.code:
-            return PoulinDecoder(self.XZ, code, self.p).decode_measurement(measurement_flips)
-        return self.decode_measurement(measurement_flips)
-
-    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-        return PoulinDecoder(self.XZ, get_c4c6_code(level), self.p).decode_measurement(measurement_flips)
-
-    def _decode_syndrome_node(self, syndrome: np.ndarray, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
-        assert syndrome.ndim == 2 and syndrome.shape[1] == (code.n - code.k) // 2
-        if not code.children:
-            data = self._local_table(code)
-            syn = _bits_to_index(syndrome)
-            log_prob = data["prob"][syn]
-            recovery_options = data["recovery"][syn]
-            return log_prob, recovery_options
- 
-        data = self._local_table(code.parent)
-        parent_width = data["check"].shape[0]
-        child_probs = []
-        child_recoveries = []
-        child_offset = 0
-        for child in code.children:
-            child_width = (child.n - child.k) // 2
-            prob, recovery_options = self._decode_syndrome_node(
-                syndrome[:, child_offset : child_offset + child_width],
-                child,
-            )
-            child_probs.append(prob)
-            child_recoveries.append(recovery_options)
-            child_offset += child_width
-        parent_syndrome = syndrome[:, child_offset : child_offset + parent_width]
-        syn = _bits_to_index(parent_syndrome)
-        probs = np.stack(child_probs, axis=1)
-        local_ops = data["local_ops"][syn]
-        x3 = np.zeros((syndrome.shape[0], data["logical_list"].shape[0], data["check_list"].shape[0]), dtype=np.float64)
-        batch = np.arange(syndrome.shape[0])[:, None, None]
-        for child_i, child in enumerate(code.children):
-            sl = slice(2 * child_i, 2 * child_i + 2)
-            child_logical = _bits_to_index(local_ops[..., sl])
-            x3 += probs[batch, child_i, child_logical] # x3[syndrome, logical_class, stabilizer_choice] = log probability of child logical class given syndrome and stabilizer choice
-        log_prob = scipy.special.logsumexp(x3, axis=2)
-        log_prob -= scipy.special.logsumexp(log_prob, axis=1, keepdims=True)
-
-        best_stabilizer = np.argmax(x3, axis=2) # best_stabilizer[syndrome, logical_class] = index of stabilizer choice that maximizes log probability of child logical class given syndrome and stabilizer choice
-        recovery_options = np.zeros((syndrome.shape[0], data["logical_list"].shape[0], code.n), dtype=np.uint8)
-        for parent_logical in range(data["logical_list"].shape[0]):
-            offset = 0
-            for child_i, child in enumerate(code.children):
-                sl = slice(2 * child_i, 2 * child_i + 2)
-                desired = _bits_to_index(local_ops[np.arange(syndrome.shape[0]), parent_logical, best_stabilizer[:, parent_logical], sl])
-                recovery_options[:, parent_logical, offset : offset + child.n] = child_recoveries[child_i][
-                    np.arange(syndrome.shape[0]), desired
-                ]
-                offset += child.n
-        return log_prob, recovery_options
-
-    def _side_matrices_for_code(self, code: CSSCode) -> tuple[np.ndarray, np.ndarray]:
-        n = code.n
-        if self.XZ == "X":
-            check = code.stabilizers[:, n:]
-            logical = code.logical_x[:, :n]
-        else:
-            check = code.stabilizers[:, :n]
-            logical = code.logical_z[:, n:]
-        check = check[np.any(check, axis=1)]
-        return check.astype(np.uint8), logical.astype(np.uint8)
-
-    def _local_table(self, code: CSSCode) -> dict[str, np.ndarray]:
-        key = id(code)
-        if key in self._table_cache:
-            return self._table_cache[key]
-        check, logical = self._side_matrices_for_code(code)
-        pure_generators = self._pure_generators(code, check)
-
-        pure = (np.array(list(itertools.product([0, 1], repeat=pure_generators.shape[0])), dtype=np.uint8) @ pure_generators) % 2
-        check_list = (np.array(list(itertools.product([0, 1], repeat=check.shape[0])), dtype=np.uint8) @ check) % 2
-        logical_list = (np.array(list(itertools.product([0, 1], repeat=logical.shape[0])), dtype=np.uint8) @ logical) % 2
-        local_ops = (pure[:, None, None, :] ^ logical_list[None, :, None, :] ^ check_list[None, None, :, :]).astype(np.uint8) # local_ops[syndrome, logical_class, stabilizer_choice, qubit]
-        weight = local_ops.sum(axis=3)
-        score = np.log(self.p) * weight + np.log1p(-self.p) * (local_ops.shape[3] - weight)
-        prob = scipy.special.logsumexp(score, axis=2)
-        prob -= scipy.special.logsumexp(prob, axis=1, keepdims=True) # prob[syndrome, logical_class] = log probability of logical class given syndrome
-        best_stabilizer = np.argmax(score, axis=2) # best_stabilizer[syndrome, logical_class] = index of stabilizer choice that maximizes score
-        recovery = local_ops[np.arange(local_ops.shape[0])[:, None], np.arange(local_ops.shape[1])[None, :], best_stabilizer] # recovery[syndrome, logical_class], the best recovery for each syndrome and logical class
-        data = {
-            "check": check,
-            "logical_list": logical_list,
-            "check_list": check_list,
-            "local_ops": local_ops,
-            "prob": prob,
-            "recovery": recovery.astype(np.uint8),
+    def stats(self, key: StateCacheKey | None = None):
+        keys = {key} if key is not None else (
+            set(self._available) | set(self._generated) | set(self._accepted)
+        )
+        return {
+            item: {
+                "available": self.available(item),
+                "generated": self._generated.get(item, 0),
+                "accepted": self._accepted.get(item, 0),
+                "acceptance_rate": (
+                    self._accepted.get(item, 0) / self._generated[item]
+                    if self._generated.get(item, 0)
+                    else 0.0
+                ),
+            }
+            for item in keys
         }
-        self._table_cache[key] = data
-        return data
 
-    def _pure_generators(self, code: CSSCode, check: np.ndarray) -> np.ndarray:
-        if check.shape[0] == 0:
-            return np.zeros((0, check.shape[1]), dtype=np.uint8)
-        if code.name == "C4":
-            return np.array([[0, 1, 0, 0]], dtype=np.uint8) if self.XZ == "X" else np.array([[0, 0, 1, 0]], dtype=np.uint8)
-        if code.name == "C6":
-            if self.XZ == "X":
-                return np.array([[1, 1, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0]], dtype=np.uint8)
-            return np.array([[0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 1]], dtype=np.uint8)
+    def clear(self, key: StateCacheKey | None = None) -> None:
+        if key is None:
+            self._chunks.clear()
+            self._offsets.clear()
+            self._available.clear()
+            self._generated.clear()
+            self._accepted.clear()
+            return
+        self._chunks.pop(key, None)
+        self._offsets.pop(key, None)
+        self._available.pop(key, None)
+        self._generated.pop(key, None)
+        self._accepted.pop(key, None)
 
 
-def get_c4c6_code(level: int) -> CSSCode:
-    code = get_c4()
-    for _ in range(1, level):
-        code = concat_code(get_c6(), [code, code, code])
-    return code
+PREPARED_FRAME_CACHE = PreparedFrameCache()
+
 
 class C4C6Circuit(Circuit):
     def _thirds(self, targets):
@@ -611,130 +323,181 @@ def get_circuit_relabel(level) -> Circuit:
 
 
 # Prepare l1
-def get_PFrame_l1(shots, circuit): # circuit is cir_l1
-    # Get frame after circuit c4
-    pframe_l1 = PauliFrame(circuit, shots=shots).run()
-    # Post-selection
-    keep = (pframe_l1.samples.sum(axis=1) % 2) == 0
-    pframe_l1.update(pframe_l1.frame[keep])
-    pframe_l1.select_qubits([1, 3, 5, 7])
-    return pframe_l1
+def get_PFrame_l1(shots, circuit, error_rate, cache=None):
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
+    key = StateCacheKey("state", 1, float(error_rate))
 
-# Prepare l1 Bell
-def get_PFrame_l1_bell(shots, circuits: list[Circuit]): # circuit are cir_l1, cir_l1_bell
-    pframe_l1_bell = PauliFrame.bunch([get_PFrame_l1(shots=shots, circuit=circuits[0]), get_PFrame_l1(shots=shots, circuit=circuits[0])], circuit=circuits[1]).run()
-    return pframe_l1_bell
+    def produce(batch):
+        pframe = PauliFrame(circuit, shots=batch).run()
+        keep = (pframe.samples.sum(axis=1) % 2) == 0
+        pframe.update(pframe.frame[keep])
+        return pframe.select_qubits([1, 3, 5, 7])
 
-# Prepare l2
-def get_PFrame_l2(shots, decoder, circuits: list[Circuit]):
-    '''
-    decoder: GHZ state error detection.
-
-    list[Circuit] are cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2.
-    '''
-    logx_l1 = code_list[0].get_lx()
-    pframe_l2 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shots, circuits=circuits[:2]), get_PFrame_l1_bell(shots=shots, circuits=circuits[:2]), get_PFrame_l1_bell(shots=shots, circuits=circuits[:2])], circuit=circuits[2]).run()
-    mea = pframe_l2.samples
-    re_list = [decoder.decode_code(mea[:, -12:-8], c4), decoder.decode_code(mea[:, -8:-4], c4), decoder.decode_code(mea[:, -4:], c4)]
-    re = np.concatenate(re_list, axis=1)
-    # post-select
-    mask = np.all(re != -1, axis=1) & ((re[:, [0, 2, 4]].sum(axis=1) % 2) == 0) & ((re[:, [1, 3, 5]].sum(axis=1) % 2) == 0)
-    frame_l2_new = pframe_l2.frame[mask]
-    pframe_l2.update(frame_l2_new)
-    pframe_l2.select_qubits(np.r_[4:8, 12:16, 20:24])
-    frame_temp0 = pframe_l2.frame
-    # correct
-    cor = re[mask].astype(np.uint8)
-    frame_temp0[:, :4] ^= ((cor[:, [0]] * logx_l1[0]) ^ (cor[:, [1]] * logx_l1[1]))
-    frame_temp0[:, 4:8] ^= (((cor[:, [0]] ^ cor[:, [2]]) * logx_l1[0]) ^ ((cor[:, [1]] ^ cor[:, [3]]) * logx_l1[1]))
-    pframe_l2.update(frame=frame_temp0, circuit=circuits[3]).run()
-    return pframe_l2
-
-def get_PFrame_l2_bell(shots, decoder, circuits: list[Circuit]):
-    '''
-    decoder: Bell state error detection.
-
-    list[Circuit] are cir_l1, cir_l1_bell, cir_l2_p1, cir_l2_p2, cir_l2_bell, cir_l2_bell_tele.
-    '''
-    logx_l1= code_list[0].get_lx()
-    logz_l1 = code_list[0].get_lz()
-    pframe_l2_bell = PauliFrame.bunch([get_PFrame_l2(shots=shots, decoder=decoder, circuits=circuits[:4]), get_PFrame_l2(shots=shots, decoder=decoder, circuits=circuits[:4])], circuit=circuits[4]).run()
-    pframe_l1_bell_lst = [get_PFrame_l1_bell(shots=shots, circuits=circuits[:2]) for _ in range(6)]
-    n_sub = 4
-    pframe_l2_edt = PauliFrame.bunch([pframe_l2_bell] + pframe_l1_bell_lst, circuit=circuits[5]).run()
-    mea = pframe_l2_edt.samples
-    # post-select
-    rez = np.concatenate([decoder.decode_code(mea[:, i*n_sub:(i+1)*n_sub], c4) for i in range(6)], axis=1)
-    rex = np.concatenate([decoder.decode_code(mea[:, (6 + i)*n_sub:(7 + i)*n_sub], c4) for i in range(6)], axis=1)
-    mask_p = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
-    rex_new = rex[mask_p].astype(np.uint8)
-    rez_new = rez[mask_p].astype(np.uint8)
-    frame_new = pframe_l2_edt.frame[mask_p]
-    pframe_l2_edt.update(frame_new)
-    pframe_l2_edt.select_qubits(np.r_[7*n_sub:8*n_sub, 9*n_sub:10*n_sub, 11*n_sub:12*n_sub, 13*n_sub:14*n_sub, 15*n_sub:16*n_sub, 17*n_sub:18*n_sub])
-    frame_temp = pframe_l2_edt.frame
-    # correct
-    for _ in range(6):
-        frame_temp[:, _*n_sub:(_ + 1)*n_sub] ^= ((rex_new[:, [2*_]]*logx_l1[0]) ^ (rex_new[:, [2*_ + 1]]*logx_l1[1]))
-        frame_temp[:, (_ + 6)*n_sub:(_ + 7)*n_sub] ^= ((rez_new[:, [2*_]]*logz_l1[0]) ^ (rez_new[:, [2*_ + 1]]*logz_l1[1]))
-    pframe_l2_edt.update(frame_temp)
-    return pframe_l2_edt
+    return cache.get_or_prepare(key, shots, Circuit(4), produce)
 
 
-def get_PFrame_l3(shots, decoder, circuits: list[Circuit]):
-    """Prepare a level-3 state from three postselected level-2 Bell pairs.
+def get_PFrame_l1_bell(shots, circuits, error_rate, cache=None):
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
+    key = StateCacheKey("bell", 1, float(error_rate))
 
-    Circuit order: C4, L1 Bell, L2 p1, L2 p2, L2 Bell, L2 teleport,
-    L3 p1, L3 p2, L3 Bell, L3 teleport.
-    """
-    lower_code = code_list[2 - 1]
+    def produce(batch):
+        states = [
+            get_PFrame_l1(batch, circuits[0], error_rate, cache)
+            for _ in range(2)]
+        return PauliFrame.bunch(states, circuit=circuits[1]).run()
+
+    return cache.get_or_prepare(key, shots, Circuit(8), produce)
+
+
+def get_PFrame_l2(shots, decoder, circuits, error_rate, cache=None):
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
+    key = StateCacheKey("state", 2, float(error_rate))
+    lower_code = code_list[0]
+    logical_x = lower_code.get_lx()
+
+    def produce(batch):
+        lower_bells = [
+            get_PFrame_l1_bell(batch, circuits[:2], error_rate, cache)
+            for _ in range(3)]
+        pframe = PauliFrame.bunch(lower_bells, circuit=circuits[2]).run()
+        measurement = pframe.samples
+        results = np.concatenate(
+            [decoder.decode_code(measurement[:, i*4:(i+1)*4], lower_code) for i in range(3)],
+            axis=1)
+        keep = (
+            np.all(results != -1, axis=1)
+            & ((results[:, [0, 2, 4]].sum(axis=1) % 2) == 0)
+            & ((results[:, [1, 3, 5]].sum(axis=1) % 2) == 0))
+        pframe.update(pframe.frame[keep])
+        pframe.select_qubits(np.r_[4:8, 12:16, 20:24])
+        correction = results[keep].astype(np.uint8)
+        frame = pframe.frame
+        frame[:, :4] ^= (correction[:, [0]]*logical_x[0]) ^ (correction[:, [1]]*logical_x[1])
+        frame[:, 4:8] ^= (
+            (correction[:, [0]] ^ correction[:, [2]])*logical_x[0]) ^ (
+            (correction[:, [1]] ^ correction[:, [3]])*logical_x[1])
+        return pframe.update(frame=frame, circuit=circuits[3]).run()
+
+    return cache.get_or_prepare(key, shots, Circuit(12), produce)
+
+
+def get_PFrame_l2_bell(shots, decoder, circuits, error_rate, cache=None):
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
+    key = StateCacheKey("bell", 2, float(error_rate))
+    lower_code = code_list[0]
+    logical_x = lower_code.get_lx()
+    logical_z = lower_code.get_lz()
+
+    def produce(batch):
+        states = [
+            get_PFrame_l2(batch, decoder, circuits[:4], error_rate, cache)
+            for _ in range(2)]
+        pframe_bell = PauliFrame.bunch(states, circuit=circuits[4]).run()
+        lower_bells = [
+            get_PFrame_l1_bell(batch, circuits[:2], error_rate, cache)
+            for _ in range(6)]
+        pframe = PauliFrame.bunch([pframe_bell] + lower_bells, circuit=circuits[5]).run()
+        measurement = pframe.samples
+        rez = np.concatenate(
+            [decoder.decode_code(measurement[:, i*4:(i+1)*4], lower_code) for i in range(6)],
+            axis=1)
+        rex = np.concatenate(
+            [decoder.decode_code(measurement[:, (6+i)*4:(7+i)*4], lower_code) for i in range(6)],
+            axis=1)
+        keep = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
+        rex = rex[keep].astype(np.uint8)
+        rez = rez[keep].astype(np.uint8)
+        pframe.update(pframe.frame[keep])
+        pframe.select_qubits(np.r_[28:32, 36:40, 44:48, 52:56, 60:64, 68:72])
+        frame = pframe.frame
+        for i in range(6):
+            frame[:, i*4:(i+1)*4] ^= (rex[:, [2*i]]*logical_x[0]) ^ (rex[:, [2*i+1]]*logical_x[1])
+            frame[:, (6+i)*4:(7+i)*4] ^= (rez[:, [2*i]]*logical_z[0]) ^ (rez[:, [2*i+1]]*logical_z[1])
+        return pframe.update(frame)
+
+    return cache.get_or_prepare(key, shots, Circuit(24), produce)
+
+
+def get_PFrame_l3(shots, decoder, circuits, error_rate, cache=None):
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
+    key = StateCacheKey("state", 3, float(error_rate))
+    lower_code = code_list[1]
     n_sub = lower_code.n
     logical_x = lower_code.get_lx()
-    lower_bells = [get_PFrame_l2_bell(shots=shots, decoder=decoder, circuits=circuits[:6]) for _ in range(3)]
-    pframe_l3 = PauliFrame.bunch(lower_bells, circuit=circuits[6]).run()
-    measurement = pframe_l3.samples
-    results = np.concatenate([decoder.decode_code(measurement[:, i*n_sub:(i+1)*n_sub], lower_code) for i in range(3)], axis=1)
-    keep = (np.all(results != -1, axis=1) & ((results[:, [0, 2, 4]].sum(axis=1) % 2) == 0) & ((results[:, [1, 3, 5]].sum(axis=1) % 2) == 0))
 
-    pframe_l3.update(pframe_l3.frame[keep])
-    pframe_l3.select_qubits(np.r_[n_sub:2*n_sub, 3*n_sub:4*n_sub, 5*n_sub:6*n_sub])
-    correction = results[keep].astype(np.uint8)
-    frame = pframe_l3.frame
-    frame[:, :n_sub] ^= (correction[:, [0]]*logical_x[0]) ^ (correction[:, [1]]*logical_x[1])
-    frame[:, n_sub:2*n_sub] ^= ((correction[:, [0]] ^ correction[:, [2]])*logical_x[0]) ^ ((correction[:, [1]] ^ correction[:, [3]])*logical_x[1])
-    return pframe_l3.update(frame=frame, circuit=circuits[7]).run()
+    def produce(batch):
+        lower_bells = [
+            get_PFrame_l2_bell(batch, decoder, circuits[:6], error_rate, cache)
+            for _ in range(3)]
+        pframe = PauliFrame.bunch(lower_bells, circuit=circuits[6]).run()
+        measurement = pframe.samples
+        results = np.concatenate(
+            [decoder.decode_code(measurement[:, i*n_sub:(i+1)*n_sub], lower_code) for i in range(3)],
+            axis=1)
+        keep = (
+            np.all(results != -1, axis=1)
+            & ((results[:, [0, 2, 4]].sum(axis=1) % 2) == 0)
+            & ((results[:, [1, 3, 5]].sum(axis=1) % 2) == 0))
+        pframe.update(pframe.frame[keep])
+        pframe.select_qubits(np.r_[n_sub:2*n_sub, 3*n_sub:4*n_sub, 5*n_sub:6*n_sub])
+        correction = results[keep].astype(np.uint8)
+        frame = pframe.frame
+        frame[:, :n_sub] ^= (correction[:, [0]]*logical_x[0]) ^ (correction[:, [1]]*logical_x[1])
+        frame[:, n_sub:2*n_sub] ^= (
+            (correction[:, [0]] ^ correction[:, [2]])*logical_x[0]) ^ (
+            (correction[:, [1]] ^ correction[:, [3]])*logical_x[1])
+        return pframe.update(frame=frame, circuit=circuits[7]).run()
+
+    return cache.get_or_prepare(key, shots, Circuit(36), produce)
 
 
-def get_PFrame_l3_bell(shots, decoder, circuits: list[Circuit]):
-    """Prepare and level-2-EDT a level-3 Bell pair."""
-    lower_code = code_list[2 - 1]
+def get_PFrame_l3_bell(shots, decoder, circuits, error_rate, cache=None):
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
+    key = StateCacheKey("bell", 3, float(error_rate))
+    lower_code = code_list[1]
     n_sub = lower_code.n
     logical_x = lower_code.get_lx()
     logical_z = lower_code.get_lz()
-    pframe_l3_bell = PauliFrame.bunch([get_PFrame_l3(shots=shots, decoder=decoder, circuits=circuits[:8]), get_PFrame_l3(shots=shots, decoder=decoder, circuits=circuits[:8]),],circuit=circuits[8]).run()
-    lower_bells = [get_PFrame_l2_bell(shots=shots, decoder=decoder, circuits=circuits[:6]) for _ in range(6)]
-    pframe_l3_edt = PauliFrame.bunch([pframe_l3_bell] + lower_bells, circuit=circuits[9]).run()
-    measurement = pframe_l3_edt.samples
-    rez = np.concatenate([decoder.decode_code(measurement[:, i*n_sub:(i+1)*n_sub], lower_code) for i in range(6)], axis=1)
-    rex = np.concatenate([decoder.decode_code(measurement[:, (6+i)*n_sub:(7+i)*n_sub], lower_code) for i in range(6)], axis=1)
-    keep = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
-    rex = rex[keep].astype(np.uint8)
-    rez = rez[keep].astype(np.uint8)
-    pframe_l3_edt.update(pframe_l3_edt.frame[keep])
-    pframe_l3_edt.select_qubits(np.concatenate([np.arange((7+2*i)*n_sub, (8+2*i)*n_sub) for i in range(6)]))
 
-    frame = pframe_l3_edt.frame
-    for i in range(6):
-        frame[:, i*n_sub:(i+1)*n_sub] ^= (rex[:, [2*i]] * logical_x[0]) ^ (rex[:, [2*i+1]] * logical_x[1])
-        frame[:, (6+i)*n_sub:(7+i)*n_sub] ^= (rez[:, [2*i]] * logical_z[0]) ^ (rez[:, [2*i+1]] * logical_z[1])
-    return pframe_l3_edt.update(frame)
+    def produce(batch):
+        states = [
+            get_PFrame_l3(batch, decoder, circuits[:8], error_rate, cache)
+            for _ in range(2)]
+        pframe_bell = PauliFrame.bunch(states, circuit=circuits[8]).run()
+        lower_bells = [
+            get_PFrame_l2_bell(batch, decoder, circuits[:6], error_rate, cache)
+            for _ in range(6)]
+        pframe = PauliFrame.bunch([pframe_bell] + lower_bells, circuit=circuits[9]).run()
+        measurement = pframe.samples
+        rez = np.concatenate(
+            [decoder.decode_code(measurement[:, i*n_sub:(i+1)*n_sub], lower_code) for i in range(6)],
+            axis=1)
+        rex = np.concatenate(
+            [decoder.decode_code(measurement[:, (6+i)*n_sub:(7+i)*n_sub], lower_code) for i in range(6)],
+            axis=1)
+        keep = np.all(rex != -1, axis=1) & np.all(rez != -1, axis=1)
+        rex = rex[keep].astype(np.uint8)
+        rez = rez[keep].astype(np.uint8)
+        pframe.update(pframe.frame[keep])
+        pframe.select_qubits(
+            np.concatenate([
+                np.arange((7+2*i)*n_sub, (8+2*i)*n_sub)
+                for i in range(6)]))
+        frame = pframe.frame
+        for i in range(6):
+            frame[:, i*n_sub:(i+1)*n_sub] ^= (rex[:, [2*i]]*logical_x[0]) ^ (rex[:, [2*i+1]]*logical_x[1])
+            frame[:, (6+i)*n_sub:(7+i)*n_sub] ^= (rez[:, [2*i]]*logical_z[0]) ^ (rez[:, [2*i+1]]*logical_z[1])
+        return pframe.update(frame)
+
+    return cache.get_or_prepare(key, shots, Circuit(72), produce)
 
 
 
-def run_level1(shots, noise):
+def run_level1(shots, noise, cache=None):
     shot = shots
     er = noise
     dec = KnillDecoder()
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
     
     cir_l1_i = get_circuit_c4(0)
     cir_l1_bell_i = get_circuit_c4c6_bell(1, 0)
@@ -750,11 +513,19 @@ def run_level1(shots, noise):
         C4C6Circuit(4*n_q)
         .depolarize2(np.column_stack((ind_q[:n_q], ind_q[2*n_q:3*n_q])).ravel(), er)
     )
-    pframe_l1 = PauliFrame.bunch([get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1_i, cir_l1_bell_i])], circuit=cir_a).run()
+    pframe_l1 = PauliFrame.bunch([
+        get_PFrame_l1_bell(shot, [cir_l1_i, cir_l1_bell_i], 0.0, cache),
+        get_PFrame_l1_bell(shot, [cir_l1_i, cir_l1_bell_i], 0.0, cache),
+    ], circuit=cir_a).run()
     ## ECT
     cir_b = get_circuit_tele(1, er)
-    pframe_l1_ect = PauliFrame.bunch([pframe_l1, get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell]), get_PFrame_l1_bell(shots=shot, circuits=[cir_l1, cir_l1_bell])], circuit=cir_b).run()
+    pframe_l1_ect = PauliFrame.bunch([
+        pframe_l1,
+        get_PFrame_l1_bell(shot, [cir_l1, cir_l1_bell], er, cache),
+        get_PFrame_l1_bell(shot, [cir_l1, cir_l1_bell], er, cache),
+    ], circuit=cir_b).run()
     shot_eff = pframe_l1_ect.frame.shape[0] # effective shots after post-selection
+    print(f"shot_eff: {shot_eff}")
     mea = pframe_l1_ect.samples
     frame_corrected = ECT(1, dec, mea, pframe_l1_ect.frame)
     # select qubits
@@ -774,10 +545,11 @@ def run_level1(shots, noise):
 
     return float(num_err/shot_eff)
 
-def run_level2(shots, noise):
+def run_level2(shots, noise, cache=None):
     shot = shots
     er = noise
     dec = KnillDecoder()
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
 
     circits_i = [
         get_circuit_c4(0),
@@ -785,8 +557,7 @@ def run_level2(shots, noise):
         get_circuit_c4c6_p1(2, 0),
         get_circuit_c4c6_p2(2, 0),
         get_circuit_c4c6_bell(2, 0),
-        get_circuit_c4c6_tele(2, 0),
-    ]
+        get_circuit_c4c6_tele(2, 0)]
     
     circuits = [
         get_circuit_c4(er),
@@ -794,8 +565,7 @@ def run_level2(shots, noise):
         get_circuit_c4c6_p1(2, er),
         get_circuit_c4c6_p2(2, er),
         get_circuit_c4c6_bell(2, er),
-        get_circuit_c4c6_tele(2, er)
-    ]
+        get_circuit_c4c6_tele(2, er)]
 
     ### level 2
     n_q = 12
@@ -803,12 +573,16 @@ def run_level2(shots, noise):
     ## Dep error
     cir_a = (
         C4C6Circuit(4*n_q)
-        .depolarize2(np.column_stack((ind_q[:n_q], ind_q[2*n_q:3*n_q])).ravel(), er)
-    )
-    pframe_l2 = PauliFrame.bunch([get_PFrame_l2_bell(shots=shot, decoder=dec, circuits=circits_i), get_PFrame_l2_bell(shots=shot, decoder=dec, circuits=circits_i)], circuit=cir_a).run()
+        .depolarize2(np.column_stack((ind_q[:n_q], ind_q[2*n_q:3*n_q])).ravel(), er))
+    pframe_l2 = PauliFrame.bunch([
+        get_PFrame_l2_bell(shot, dec, circits_i, 0.0, cache),
+        get_PFrame_l2_bell(shot, dec, circits_i, 0.0, cache)], circuit=cir_a).run()
     ## ECT
     cir_b = get_circuit_tele(2, er)
-    pframe_l2_ect = PauliFrame.bunch([pframe_l2, get_PFrame_l2_bell(shots=shot, decoder=dec, circuits=circuits), get_PFrame_l2_bell(shots=shot, decoder=dec, circuits=circuits)], circuit=cir_b).run()
+    pframe_l2_ect = PauliFrame.bunch([
+        pframe_l2,
+        get_PFrame_l2_bell(shot, dec, circuits, er, cache),
+        get_PFrame_l2_bell(shot, dec, circuits, er, cache)], circuit=cir_b).run()
     shot_eff = pframe_l2_ect.frame.shape[0]
     print(f"shot_eff: {shot_eff}")
     mea = pframe_l2_ect.samples
@@ -831,11 +605,12 @@ def run_level2(shots, noise):
     return float(num_err/shot_eff)
 
 
-def run_level3(shots, noise):
+def run_level3(shots, noise, cache=None):
     shot = shots
     er = noise
     dec = KnillDecoder()
     code = get_c4c6_code(3)
+    cache = PREPARED_FRAME_CACHE if cache is None else cache
 
     circuits_i = [
         get_circuit_c4(0),
@@ -868,9 +643,16 @@ def run_level3(shots, noise):
         C4C6Circuit(4*n_q)
         .depolarize2(np.column_stack((ind_q[:n_q], ind_q[2*n_q:3*n_q])).ravel(), er)
     )
-    pframe_l3 = PauliFrame.bunch([get_PFrame_l3_bell(shots=shot, decoder=dec, circuits=circuits_i), get_PFrame_l3_bell(shots=shot, decoder=dec, circuits=circuits_i)], circuit=noisy_cnot).run()
+    pframe_l3 = PauliFrame.bunch([
+        get_PFrame_l3_bell(shot, dec, circuits_i, 0.0, cache),
+        get_PFrame_l3_bell(shot, dec, circuits_i, 0.0, cache),
+    ], circuit=noisy_cnot).run()
 
-    pframe_l3_ect = PauliFrame.bunch([pframe_l3, get_PFrame_l3_bell(shots=shot, decoder=dec, circuits=circuits), get_PFrame_l3_bell(shots=shot, decoder=dec, circuits=circuits)], circuit=get_circuit_tele(3, er)).run()
+    pframe_l3_ect = PauliFrame.bunch([
+        pframe_l3,
+        get_PFrame_l3_bell(shot, dec, circuits, er, cache),
+        get_PFrame_l3_bell(shot, dec, circuits, er, cache),
+    ], circuit=get_circuit_tele(3, er)).run()
     shot_eff = pframe_l3_ect.shots
     print(f"shot_eff: {shot_eff}")
     corrected = ECT(3, dec, pframe_l3_ect.samples, pframe_l3_ect.frame)
@@ -895,13 +677,13 @@ c4c6_l2 = concat_code(c6, [c4, c4, c4])
 c4c6_l3 = concat_code(c6, [c4c6_l2, c4c6_l2, c4c6_l2])
 code_list = [c4c6_l1, c4c6_l2, c4c6_l3]
 
-shot = 10000
+shot = 100000
 
 err_list = np.linspace(0.002, 0.01, 10)
-# err_list = np.linspace(0.01, 0.012, 1)
-# ler_list = [run_level1(shot, err) for err in err_list]
+# err_list = np.linspace(0.1, 0.2, 3)
+ler_list = [run_level1(shot, err) for err in err_list]
 # ler_list = [run_level2(shot, err) for err in err_list]
-ler_list = [run_level3(shot, err) for err in err_list]
+# ler_list = [run_level3(shot, err) for err in err_list]
 
 print(err_list.tolist())
 print(ler_list)
