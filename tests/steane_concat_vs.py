@@ -119,14 +119,19 @@ def one_task(level, ind_p, code, p, batch, stab, logical):
 
     decoder_tele = BiasedPoulinDecoder(code, 1/4, 1/4, 1/4)
     decoder_end = BiasedPoulinDecoder(code, 1/4, 1/4, 1/4)
+    check_list = np.concatenate([stab, logical], axis=0)
 
-    #### Unbiased decoding
     pframe = PauliFrame(circuit=circ, shots=batch)
     pframe.frame.fill(0) # turn it into code capacity simulation
     pframe.run()
     error = pframe.samples
     pframe.select_qubits(ind_q[2*n_q:]) # select all qubits
     frame = pframe.frame
+
+    error_copy = error.copy()
+    frame_copy = frame.copy()
+
+    #### Unbiased decoding
     ## Knill correction
     syn0 = matmul_gf4(error, stab.T)
     decoder_tele.set_error_model(p/3, p/3, p/3) ########### set the ECT error distribution
@@ -138,34 +143,27 @@ def one_task(level, ind_p, code, p, batch, stab, logical):
     re1, prob_L = decoder_end.decode(syn1)
     tmp1 = (tmp0 + re1) % 2
 
-    check_list = np.concatenate([stab, logical], axis=0)
     num_fail = int(matmul_gf4(tmp1, check_list.T).max(axis=1).sum())
     num_total = tmp0.shape[0]
 
     #### Biased decoding
-    pframe = PauliFrame(circuit=circ, shots=batch)
-    pframe.frame.fill(0) # turn it into code capacity simulation
-    pframe.run()
-    error = pframe.samples
-    pframe.select_qubits(ind_q[2*n_q:]) # select all qubits
-    frame = pframe.frame
     ## Knill correction
-    syn0 = matmul_gf4(error, stab.T)
+    syn0 = matmul_gf4(error_copy, stab.T)
     ########### set the ECT error distribution
+    # decoder_tele.set_error_model(p/3, p/3, p/3)
     decoder_tele.set_error_model((1 - r_a*r_b)/4, (1 - r_a*r_b)/4, (1 + r_a*r_b - 2*r_a*r_b**2)/4)
     re0, prob_L = decoder_tele.decode(syn0)
-    tmp0 = (frame + (error + re0)) % 2
+    tmp0 = (frame_copy + (error_copy + re0)) % 2
     ## Count the failures
     syn1 = matmul_gf4(tmp0, stab.T)
     ########### set the output state distribution
     # p_cor = [-2*p**2, 6*p**2, (149/2)*p**2]
-    p_cor = [0, 0, 0]
-    decoder_end.set_error_model((1 + r_b - 2*r_b**2)/4 + p_cor[0], (1 - r_b)/4 + p_cor[1], (1 - r_b)/4 + p_cor[2])
-    # decoder_end.set_error_model(px_list[ind_tmp][ind_p], py_list[ind_tmp][ind_p], pz_list[ind_tmp][ind_p])
+    # p_cor = [0, 0, 0]
+    # decoder_end.set_error_model((1 + r_b - 2*r_b**2)/4 + p_cor[0], (1 - r_b)/4 + p_cor[1], (1 - r_b)/4 + p_cor[2])
+    decoder_end.set_error_model(px_list[ind_tmp][ind_p], py_list[ind_tmp][ind_p], pz_list[ind_tmp][ind_p])
     re1, prob_L = decoder_end.decode(syn1)
     tmp1 = (tmp0 + re1) % 2
 
-    check_list = np.concatenate([stab, logical], axis=0)
     num_fail_biased = int(matmul_gf4(tmp1, check_list.T).max(axis=1).sum())
     num_total_biased = tmp0.shape[0]
 
