@@ -33,11 +33,10 @@ def steane_concat_run():
     code_l2 = concat_code(code, [code, code, code, code, code, code, code])
     code_l3 = concat_code(code, [code_l2, code_l2, code_l2, code_l2, code_l2, code_l2, code_l2])
     code_list = [code, code_l2, code_l3]
-    level_list = [1]
-    # level_list = [1, 2, 3]
+    level_list = [1, 2, 3]
     
     num_sample = int(1e5)
-    plist = np.linspace(0.05, 0.07, 3)
+    plist = np.linspace(0.03, 0.06, 10)
     batch_size = 512
 
 
@@ -102,8 +101,8 @@ def one_task(code, p, batch, stab, logical, decoder_list):
 
 
     p_a = p
-    p_b = p
-    p_c = p
+    p_b = 2*p
+    p_c = 2*p
     r_a = 1 - 4*p_a/3
     r_b = 1 - 4*p_b/3
     r_c = 1 - 4*p_c/3
