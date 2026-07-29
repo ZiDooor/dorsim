@@ -6,13 +6,19 @@ from .stab_code import (
     concat_code,
     get_c4c6_code,
 )
-from .decoder import BiasedPoulinDecoder, KnillDecoder, PoulinDecoder
+from .decoder import (
+    BiasedPoulinDecoder,
+    CombinedPoulinDecoder,
+    KnillDecoder,
+    PoulinDecoder,
+)
 from .pauli_frame import PauliFrame
 from .tableau_sim import TableauSim
 
 # Define the public API of the dorsim package
 __all__ = [
     "BiasedPoulinDecoder",
+    "CombinedPoulinDecoder",
     "CSSCode",
     "Circuit",
     "KnillDecoder",

@@ -283,7 +283,7 @@ class BiasedPoulinDecoder:
         self.px = px
         self.py = py
         self.pz = pz
-        probabilities = np.array([1 - px - py - pz, pz, px, py], dtype=np.float64)
+        probabilities = np.array([1 - px - py - pz, px, pz, py], dtype=np.float64)
         self._log_probabilities = np.log(probabilities)
         self._table_cache = {}
 
@@ -297,6 +297,14 @@ class BiasedPoulinDecoder:
         best_logical = np.argmax(log_prob, axis=1)
         recovery = recovery_options[np.arange(s.shape[0]), best_logical].astype(np.uint8)
         return recovery, {-1: log_prob}
+
+    def decode_syndrome_with_logical(
+        self,
+        syndrome: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, dict[int, np.ndarray]]:
+        recovery, probabilities = self.decode_syndrome(syndrome)
+        best_logical = np.argmax(probabilities[-1], axis=1)
+        return recovery, best_logical, probabilities
 
     def _decode_syndrome_node(
         self,
@@ -368,7 +376,7 @@ class BiasedPoulinDecoder:
         logical_generators = np.concatenate([code.logical_x, code.logical_z], axis=0)
         logical_list = (logical_bits @ logical_generators) % 2
         local_ops = (pure_list[:, None, None, :] ^ logical_list[None, :, None, :] ^ stabilizer_list[None, None, :, :]).astype(np.uint8)
-        pauli = 2*local_ops[..., :code.n] + local_ops[..., code.n:]
+        pauli = local_ops[..., :code.n] + 2*local_ops[..., code.n:]
         score = self._log_probabilities[pauli].sum(axis=3)
         prob = scipy.special.logsumexp(score, axis=2)
         normalizer = scipy.special.logsumexp(prob, axis=1)
@@ -383,6 +391,314 @@ class BiasedPoulinDecoder:
             "local_ops": local_ops,
             "prob": prob,
             "recovery": recovery.astype(np.uint8),
+        }
+        self._table_cache[key] = data
+        return data
+
+
+class CombinedPoulinDecoder:
+    """Decodes F using an independent Pauli model for the frame difference M xor F."""
+
+    def __init__(
+        self,
+        code: StabilizerCode,
+        px: float,
+        py: float,
+        pz: float,
+    ):
+        self.code = code
+        self._table_cache = {}
+        self.set_error_model(px, py, pz)
+
+    def set_error_model(self, px: float, py: float, pz: float) -> None:
+        rates = np.asarray([px, py, pz], dtype=np.float64)
+        if not np.all(np.isfinite(rates)):
+            raise ValueError("Pauli error probabilities must be finite")
+        if np.any(rates < 0) or rates.sum() > 1:
+            raise ValueError(
+                "px, py, and pz must be nonnegative and sum to at most 1"
+            )
+        self.px = float(px)
+        self.py = float(py)
+        self.pz = float(pz)
+        probabilities = np.array(
+            [1 - px - py - pz, px, pz, py],
+            dtype=np.float64,
+        )
+        with np.errstate(divide="ignore"):
+            self._log_probabilities = np.log(probabilities)
+
+    def decode(
+        self,
+        syndrome_m: np.ndarray,
+        syndrome_f: np.ndarray,
+        logical_m: int | np.ndarray,
+    ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        return self.decode_syndrome(syndrome_m, syndrome_f, logical_m)
+
+    def decode_syndrome(
+        self,
+        syndrome_m: np.ndarray,
+        syndrome_f: np.ndarray,
+        logical_m: int | np.ndarray,
+    ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        sm = np.asarray(syndrome_m, dtype=np.uint8)
+        sf = np.asarray(syndrome_f, dtype=np.uint8)
+        expected_width = self.code.n - self.code.k
+        if sm.ndim != 2 or sm.shape[1] != expected_width:
+            raise ValueError(f"syndrome_m must have shape (batch, {expected_width})")
+        if sf.shape != sm.shape:
+            raise ValueError("syndrome_f must have the same shape as syndrome_m")
+        if np.any(sm > 1) or np.any(sf > 1):
+            raise ValueError("syndromes must contain only binary values")
+
+        logical_input = np.asarray(logical_m)
+        if not (
+            np.issubdtype(logical_input.dtype, np.integer)
+            or np.issubdtype(logical_input.dtype, np.bool_)
+        ):
+            raise ValueError("logical_m must contain integer logical-class indices")
+        if logical_input.ndim == 0:
+            logical_indices = np.full(sm.shape[0], int(logical_input), dtype=np.int64)
+        elif logical_input.shape == (sm.shape[0],):
+            logical_indices = logical_input.astype(np.int64, copy=False)
+        else:
+            raise ValueError("logical_m must be a scalar or have shape (batch,)")
+        logical_count = 4**self.code.k
+        if np.any(logical_indices < 0) or np.any(logical_indices >= logical_count):
+            raise ValueError(f"logical_m values must be in [0, {logical_count})")
+
+        batch = np.arange(sm.shape[0])
+        joint_log_prob, recovery_options = self._decode_joint_node(
+            sm,
+            sf,
+            self.code,
+        )
+        conditional = joint_log_prob[batch, logical_indices]
+        self._normalize_conditional_or_raise(conditional)
+        best_logical_f = np.argmax(conditional, axis=1)
+        recovery = recovery_options[
+            batch,
+            logical_indices,
+            best_logical_f,
+        ].astype(np.uint8)
+        return recovery, {-1: conditional}
+
+    def _decode_joint_node(
+        self,
+        syndrome_m: np.ndarray,
+        syndrome_f: np.ndarray,
+        code: StabilizerCode,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if not code.children:
+            return self._decode_joint_leaf(syndrome_m, syndrome_f, code)
+
+        child_probs = []
+        child_recoveries = []
+        child_offset = 0
+        for child in code.children:
+            child_width = child.n - child.k
+            prob, recovery = self._decode_joint_node(
+                syndrome_m[:, child_offset : child_offset + child_width],
+                syndrome_f[:, child_offset : child_offset + child_width],
+                child,
+            )
+            child_probs.append(prob)
+            child_recoveries.append(recovery)
+            child_offset += child_width
+
+        parent = code.parent
+        parent_width = parent.n - parent.k
+        data = self._local_table(parent)
+        syn_m = _bits_to_index(
+            syndrome_m[:, child_offset : child_offset + parent_width]
+        )
+        syn_f = _bits_to_index(
+            syndrome_f[:, child_offset : child_offset + parent_width]
+        )
+        ops_m = data["local_ops"][syn_m]
+        ops_f = data["local_ops"][syn_f]
+        batch_size, logical_count, stabilizer_count = ops_m.shape[:3]
+        score = np.zeros(
+            (
+                batch_size,
+                logical_count,
+                logical_count,
+                stabilizer_count,
+                stabilizer_count,
+            ),
+            dtype=np.float64,
+        )
+        batch5 = np.arange(batch_size)[:, None, None, None, None]
+        logical_offsets = np.cumsum([0] + [child.k for child in code.children])
+        child_class_m = []
+        child_class_f = []
+        for child_i, child in enumerate(code.children):
+            start = logical_offsets[child_i]
+            stop = logical_offsets[child_i + 1]
+            bits_m = np.concatenate(
+                [
+                    ops_m[..., start:stop],
+                    ops_m[..., parent.n + start : parent.n + stop],
+                ],
+                axis=-1,
+            )
+            bits_f = np.concatenate(
+                [
+                    ops_f[..., start:stop],
+                    ops_f[..., parent.n + start : parent.n + stop],
+                ],
+                axis=-1,
+            )
+            class_m = _bits_to_index(bits_m)
+            class_f = _bits_to_index(bits_f)
+            child_class_m.append(class_m)
+            child_class_f.append(class_f)
+            score += child_probs[child_i][
+                batch5,
+                class_m[:, :, None, :, None],
+                class_f[:, None, :, None, :],
+            ]
+
+        joint_log_prob = scipy.special.logsumexp(score, axis=(3, 4))
+        self._normalize_joint_in_place(joint_log_prob)
+        best_pair = np.argmax(
+            score.reshape(
+                batch_size,
+                logical_count,
+                logical_count,
+                stabilizer_count * stabilizer_count,
+            ),
+            axis=3,
+        )
+        best_stabilizer_m = best_pair // stabilizer_count
+        best_stabilizer_f = best_pair % stabilizer_count
+        recovery_options = np.zeros(
+            (batch_size, logical_count, logical_count, 2 * code.n),
+            dtype=np.uint8,
+        )
+        batch3 = np.arange(batch_size)[:, None, None]
+        logical_m_grid = np.arange(logical_count)[None, :, None]
+        logical_f_grid = np.arange(logical_count)[None, None, :]
+        physical_offsets = np.cumsum([0] + [child.n for child in code.children])
+        for child_i, child in enumerate(code.children):
+            desired_m = child_class_m[child_i][
+                batch3,
+                logical_m_grid,
+                best_stabilizer_m,
+            ]
+            desired_f = child_class_f[child_i][
+                batch3,
+                logical_f_grid,
+                best_stabilizer_f,
+            ]
+            child_recovery = child_recoveries[child_i][
+                batch3,
+                desired_m,
+                desired_f,
+            ]
+            start_q = physical_offsets[child_i]
+            stop_q = physical_offsets[child_i + 1]
+            recovery_options[..., start_q:stop_q] = child_recovery[..., : child.n]
+            recovery_options[
+                ..., code.n + start_q : code.n + stop_q
+            ] = child_recovery[..., child.n :]
+        return joint_log_prob, recovery_options
+
+    def _decode_joint_leaf(
+        self,
+        syndrome_m: np.ndarray,
+        syndrome_f: np.ndarray,
+        code: StabilizerCode,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        data = self._local_table(code)
+        ops_m = data["local_ops"][_bits_to_index(syndrome_m)]
+        ops_f = data["local_ops"][_bits_to_index(syndrome_f)]
+        pauli_m = ops_m[..., : code.n] + 2 * ops_m[..., code.n :]
+        pauli_f = ops_f[..., : code.n] + 2 * ops_f[..., code.n :]
+        batch_size, logical_count, stabilizer_count = pauli_m.shape[:3]
+        score = np.zeros(
+            (
+                batch_size,
+                logical_count,
+                logical_count,
+                stabilizer_count,
+                stabilizer_count,
+            ),
+            dtype=np.float64,
+        )
+        for qubit in range(code.n):
+            difference = (
+                pauli_m[:, :, None, :, None, qubit]
+                ^ pauli_f[:, None, :, None, :, qubit]
+            )
+            score += self._log_probabilities[difference]
+        joint_log_prob = scipy.special.logsumexp(score, axis=(3, 4))
+        self._normalize_joint_in_place(joint_log_prob)
+        best_pair = np.argmax(
+            score.reshape(
+                batch_size,
+                logical_count,
+                logical_count,
+                stabilizer_count * stabilizer_count,
+            ),
+            axis=3,
+        )
+        best_stabilizer_f = best_pair % stabilizer_count
+        recovery_options = ops_f[
+            np.arange(batch_size)[:, None, None],
+            np.arange(logical_count)[None, None, :],
+            best_stabilizer_f,
+        ]
+        return joint_log_prob, recovery_options.astype(np.uint8)
+
+    @staticmethod
+    def _normalize_joint_in_place(joint_log_prob: np.ndarray) -> None:
+        normalizer = scipy.special.logsumexp(joint_log_prob, axis=(1, 2))
+        finite = np.isfinite(normalizer)
+        joint_log_prob[finite] -= normalizer[finite, None, None]
+
+    @staticmethod
+    def _normalize_conditional_or_raise(log_prob: np.ndarray) -> None:
+        normalizer = scipy.special.logsumexp(log_prob, axis=1)
+        impossible = ~np.isfinite(normalizer)
+        if np.any(impossible):
+            indices = np.flatnonzero(impossible).tolist()
+            raise ValueError(
+                "P(syndrome_m, syndrome_f, logical_m) is zero for batch "
+                f"indices {indices}"
+            )
+        log_prob -= normalizer[:, None]
+
+    def _local_table(self, code: StabilizerCode) -> dict[str, np.ndarray]:
+        key = id(code)
+        if key in self._table_cache:
+            return self._table_cache[key]
+        syndrome_bits = np.array(
+            list(itertools.product([0, 1], repeat=code.n - code.k)),
+            dtype=np.uint8,
+        )
+        logical_bits = np.array(
+            list(itertools.product([0, 1], repeat=2 * code.k)),
+            dtype=np.uint8,
+        )
+        stabilizer_list = (syndrome_bits @ code.stabilizers) % 2
+        pure_list = (syndrome_bits @ code.pure_errors) % 2
+        logical_generators = np.concatenate(
+            [code.logical_x, code.logical_z],
+            axis=0,
+        )
+        logical_list = (logical_bits @ logical_generators) % 2
+        local_ops = (
+            pure_list[:, None, None, :]
+            ^ logical_list[None, :, None, :]
+            ^ stabilizer_list[None, None, :, :]
+        ).astype(np.uint8)
+        data = {
+            "pure_list": pure_list,
+            "stabilizer_list": stabilizer_list,
+            "logical_list": logical_list,
+            "local_ops": local_ops,
         }
         self._table_cache[key] = data
         return data
