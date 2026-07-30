@@ -8,7 +8,7 @@ from .stab_code import (
 )
 from .decoder import (
     BiasedPoulinDecoder,
-    CombinedPoulinDecoder,
+    # CombinedPoulinDecoder,
     JointCombinedPoulinDecoder,
     KnillDecoder,
     PoulinDecoder,
