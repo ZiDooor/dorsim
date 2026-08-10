@@ -499,7 +499,7 @@ class BiasedPoulinDecoder:
 #         log_prob -= normalizer[:, None]
 
 # TODO: AI draft, need check
-class JointCombinedPoulinDecoder:
+class JointPoulinDecoder:
     """Decodes a final frame using the joint local channel P(M, M xor F).
 
     The rows and columns of ``joint_md`` use the binary-symplectic Pauli
@@ -526,7 +526,7 @@ class JointCombinedPoulinDecoder:
         p_a: float,
         p_b: float,
         p_c: float,
-    ) -> "JointCombinedPoulinDecoder":
+    ) -> "JointPoulinDecoder":
         """Construct the exact local P(M, D) kernel for the ECT circuit."""
         rates = np.asarray([p_a, p_b, p_c], dtype=np.float64)
         if not np.all(np.isfinite(rates)):
@@ -609,8 +609,7 @@ class JointCombinedPoulinDecoder:
         log_prob_d = scipy.special.logsumexp(joint_log_prob, axis=1)
         self._normalize_last_axis_or_raise(
             log_prob_d,
-            "P(syndrome_m, syndrome_f) is zero for batch",
-        )
+            "P(syndrome_m, syndrome_f) is zero for batch")
 
         batch = np.arange(sm.shape[0])
         logical_f = np.arange(logical_count, dtype=np.int64)
@@ -623,18 +622,9 @@ class JointCombinedPoulinDecoder:
         best_logical_f = np.argmax(conditional_f, axis=1)
         best_logical_d = logical_indices ^ best_logical_f
 
-        logical_generators = np.concatenate(
-            [self.code.logical_x, self.code.logical_z],
-            axis=0,
-        )
-        canonical_m = (
-            (sm @ self.code.pure_errors) % 2
-            ^ (_index_to_bits(logical_indices, 2 * self.code.k) @ logical_generators) % 2
-        ).astype(np.uint8)
-        canonical_d = (
-            (sd @ self.code.pure_errors) % 2
-            ^ (_index_to_bits(best_logical_d, 2 * self.code.k) @ logical_generators) % 2
-        ).astype(np.uint8)
+        logical_generators = np.concatenate([self.code.logical_x, self.code.logical_z], axis=0)
+        canonical_m = ((sm @ self.code.pure_errors) % 2 ^ (_index_to_bits(logical_indices, 2 * self.code.k) @ logical_generators) % 2).astype(np.uint8)
+        canonical_d = ((sd @ self.code.pure_errors) % 2 ^ (_index_to_bits(best_logical_d, 2 * self.code.k) @ logical_generators) % 2).astype(np.uint8)
         recovery = (canonical_m ^ canonical_d).astype(np.uint8)
         return recovery, {-1: conditional_f}
 
@@ -648,8 +638,7 @@ class JointCombinedPoulinDecoder:
             table = self._leaf_joint_table(code)
             return table[
                 _bits_to_index(syndrome_m),
-                _bits_to_index(syndrome_d),
-            ]
+                _bits_to_index(syndrome_d)]
 
         child_probabilities = []
         child_offset = 0
@@ -764,11 +753,11 @@ class JointCombinedPoulinDecoder:
         probability[0] = 1
         local_labels = self._single_pauli_labels(code)
 
-        for qubit in range(code.n):
+        for qubit in range(code.n): # Enumerate each qubit
             updated = np.zeros_like(probability)
-            for pauli_m, pauli_d in itertools.product(range(4), repeat=2):
+            for pauli_m, pauli_d in itertools.product(range(4), repeat=2): # Enumerate each joint Pauli operator
                 local_probability = self.joint_md[pauli_m, pauli_d]
-                if local_probability == 0:
+                if local_probability == 0: # Ignore impossible errors
                     continue
                 sm, lm = local_labels[qubit, pauli_m]
                 sd, ld = local_labels[qubit, pauli_d]
@@ -776,8 +765,7 @@ class JointCombinedPoulinDecoder:
                     sm
                     | (lm << syndrome_bits)
                     | (sd << (syndrome_bits + logical_bits))
-                    | (ld << (2 * syndrome_bits + logical_bits))
-                )
+                    | (ld << (2 * syndrome_bits + logical_bits)))
                 updated += local_probability * probability[state_index ^ shift]
             probability = updated
 
@@ -785,14 +773,10 @@ class JointCombinedPoulinDecoder:
             logical_count,
             syndrome_count,
             logical_count,
-            syndrome_count,
-        ).transpose(3, 1, 2, 0)
+            syndrome_count).transpose(3, 1, 2, 0)
         with np.errstate(divide="ignore"):
             log_probability = np.log(joint_probability)
-        normalizer = scipy.special.logsumexp(
-            log_probability,
-            axis=(2, 3),
-        )
+        normalizer = scipy.special.logsumexp(log_probability, axis=(2, 3))
         finite = np.isfinite(normalizer)
         log_probability[finite] -= normalizer[finite, None, None]
         self._leaf_table_cache[key] = log_probability
@@ -806,10 +790,7 @@ class JointCombinedPoulinDecoder:
                 errors[row, qubit] = pauli & 1
                 errors[row, code.n + qubit] = pauli >> 1
 
-        check = np.concatenate(
-            [code.stabilizers[:, code.n :], code.stabilizers[:, : code.n]],
-            axis=1,
-        )
+        check = np.concatenate([code.stabilizers[:, code.n :], code.stabilizers[:, : code.n]], axis=1)
         syndrome = (errors @ check.T) % 2
         delta = errors ^ ((syndrome @ code.pure_errors) % 2)
         logical_x = (
@@ -831,26 +812,13 @@ class JointCombinedPoulinDecoder:
         key = id(code)
         if key in self._local_decomposition_cache:
             return self._local_decomposition_cache[key]
-        syndrome_bits = np.array(
-            list(itertools.product([0, 1], repeat=code.n - code.k)),
-            dtype=np.uint8,
-        )
-        logical_bits = np.array(
-            list(itertools.product([0, 1], repeat=2 * code.k)),
-            dtype=np.uint8,
-        )
+        syndrome_bits = np.array(list(itertools.product([0, 1], repeat=code.n - code.k)), dtype=np.uint8)
+        logical_bits = np.array(list(itertools.product([0, 1], repeat=2 * code.k)), dtype=np.uint8)
         stabilizer_list = (syndrome_bits @ code.stabilizers) % 2
         pure_list = (syndrome_bits @ code.pure_errors) % 2
-        logical_generators = np.concatenate(
-            [code.logical_x, code.logical_z],
-            axis=0,
-        )
+        logical_generators = np.concatenate([code.logical_x, code.logical_z], axis=0)
         logical_list = (logical_bits @ logical_generators) % 2
-        local_ops = (
-            pure_list[:, None, None, :]
-            ^ logical_list[None, :, None, :]
-            ^ stabilizer_list[None, None, :, :]
-        ).astype(np.uint8)
+        local_ops = (pure_list[:, None, None, :] ^ logical_list[None, :, None, :] ^ stabilizer_list[None, None, :, :]).astype(np.uint8)
         data = {"local_ops": local_ops}
         self._local_decomposition_cache[key] = data
         return data

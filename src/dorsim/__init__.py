@@ -9,7 +9,7 @@ from .stab_code import (
 from .decoder import (
     BiasedPoulinDecoder,
     # CombinedPoulinDecoder,
-    JointCombinedPoulinDecoder,
+    JointPoulinDecoder,
     KnillDecoder,
     PoulinDecoder,
 )
@@ -22,7 +22,7 @@ __all__ = [
     "CombinedPoulinDecoder",
     "CSSCode",
     "Circuit",
-    "JointCombinedPoulinDecoder",
+    "JointPoulinDecoder",
     "KnillDecoder",
     "Operation",
     "PauliFrame",
