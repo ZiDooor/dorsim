@@ -498,7 +498,6 @@ class BiasedPoulinDecoder:
 #             )
 #         log_prob -= normalizer[:, None]
 
-# TODO: AI draft, need check
 class JointPoulinDecoder:
     """Decodes a final frame using the joint local channel P(M, M xor F).
 
@@ -517,6 +516,7 @@ class JointPoulinDecoder:
         self.code = code
         self._leaf_table_cache: dict[int, np.ndarray] = {}
         self._local_decomposition_cache: dict[int, dict[str, np.ndarray]] = {}
+        self._child_logical_cache: dict[int, np.ndarray] = {}
         self.set_joint_error_model(joint_md)
 
     @classmethod
@@ -657,9 +657,9 @@ class JointPoulinDecoder:
         parent_width = parent.n - parent.k
         parent_sm = syndrome_m[:, child_offset : child_offset + parent_width]
         parent_sd = syndrome_d[:, child_offset : child_offset + parent_width]
-        data = self._local_decomposition(parent)
-        local_m = data["local_ops"][_bits_to_index(parent_sm)]
-        local_d = data["local_ops"][_bits_to_index(parent_sd)]
+        child_logical = self._child_logical_mappings(code)
+        local_m = child_logical[_bits_to_index(parent_sm)]
+        local_d = child_logical[_bits_to_index(parent_sd)]
 
         batch_size = syndrome_m.shape[0]
         logical_count = 4**parent.k
@@ -676,63 +676,30 @@ class JointPoulinDecoder:
             -np.inf,
             dtype=np.float64,
         )
-        logical_offsets = np.cumsum([0] + [child.k for child in code.children])
-
         for batch_start in range(0, batch_size, chunk_size):
             batch_stop = min(batch_start + chunk_size, batch_size)
             chunk_length = batch_stop - batch_start
             score = np.zeros(
-                (
-                    chunk_length,
-                    logical_count,
-                    logical_count,
-                    stabilizer_count,
-                    stabilizer_count,
-                ),
-                dtype=np.float64,
-            )
+                (chunk_length,
+                logical_count,
+                logical_count,
+                stabilizer_count,
+                stabilizer_count,
+                ), dtype=np.float64)
             batch_index = np.arange(chunk_length)[:, None, None, None, None]
             for child_i, child in enumerate(code.children):
-                start = logical_offsets[child_i]
-                stop = logical_offsets[child_i + 1]
-                m_bits = np.concatenate(
-                    [
-                        local_m[batch_start:batch_stop, ..., start:stop],
-                        local_m[
-                            batch_start:batch_stop,
-                            ...,
-                            parent.n + start : parent.n + stop,
-                        ],
-                    ],
-                    axis=-1,
-                )
-                d_bits = np.concatenate(
-                    [
-                        local_d[batch_start:batch_stop, ..., start:stop],
-                        local_d[
-                            batch_start:batch_stop,
-                            ...,
-                            parent.n + start : parent.n + stop,
-                        ],
-                    ],
-                    axis=-1,
-                )
-                child_m = _bits_to_index(m_bits)
-                child_d = _bits_to_index(d_bits)
-                child_log_prob = child_probabilities[child_i][
-                    batch_start:batch_stop
-                ]
+                child_m = local_m[batch_start:batch_stop, child_i]
+                child_d = local_d[batch_start:batch_stop, child_i]
+                child_log_prob = child_probabilities[child_i][batch_start:batch_stop]
                 score += child_log_prob[
                     batch_index,
                     child_m[:, :, None, :, None],
-                    child_d[:, None, :, None, :],
-                ]
+                    child_d[:, None, :, None, :]]
 
-            chunk_result = scipy.special.logsumexp(score, axis=(3, 4))
+            chunk_result = self._logsumexp_stabilizers(score)
             normalizer = scipy.special.logsumexp(
                 chunk_result,
-                axis=(1, 2),
-            )
+                axis=(1, 2))
             finite = np.isfinite(normalizer)
             chunk_result[finite] -= normalizer[finite, None, None]
             result[batch_start:batch_stop] = chunk_result
@@ -822,6 +789,43 @@ class JointPoulinDecoder:
         data = {"local_ops": local_ops}
         self._local_decomposition_cache[key] = data
         return data
+
+    def _child_logical_mappings(self, code: StabilizerCode) -> np.ndarray:
+        key = id(code)
+        if key in self._child_logical_cache:
+            return self._child_logical_cache[key]
+
+        parent = code.parent
+        local_ops = self._local_decomposition(parent)["local_ops"]
+        logical_offsets = np.cumsum([0] + [child.k for child in code.children])
+        child_logical = []
+        for child_i, child in enumerate(code.children):
+            start = logical_offsets[child_i]
+            stop = logical_offsets[child_i + 1]
+            child_bits = np.concatenate(
+                [local_ops[..., start:stop],
+                local_ops[..., parent.n + start : parent.n + stop]],
+                axis=-1)
+            child_logical.append(_bits_to_index(child_bits))
+        mappings = np.stack(child_logical, axis=1)
+        self._child_logical_cache[key] = mappings
+        return mappings
+
+    @staticmethod
+    def _logsumexp_stabilizers(score: np.ndarray) -> np.ndarray:
+        maximum = np.max(score, axis=(3, 4))
+        finite = np.isfinite(maximum)
+        offset = np.where(finite, maximum, 0.0)
+        score -= offset[..., None, None]
+        np.exp(score, out=score)
+        result = score.sum(axis=(3, 4))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            np.log(result, out=result)
+        result += offset
+        result[np.isneginf(maximum)] = -np.inf
+        result[np.isposinf(maximum)] = np.inf
+        result[np.isnan(maximum)] = np.nan
+        return result
 
     @staticmethod
     def _normalize_last_axis_or_raise(
