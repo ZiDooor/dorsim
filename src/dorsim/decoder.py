@@ -272,7 +272,7 @@ class PoulinDecoder:
             return np.array([[0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 1]], dtype=np.uint8)
 
 
-class BiasedPoulinDecoder:
+class CombinedPoulinDecoder:
     def __init__(
         self,
         code: StabilizerCode,
@@ -402,101 +402,6 @@ class BiasedPoulinDecoder:
         self._table_cache[key] = data
         return data
 
-
-# class CombinedPoulinDecoder:
-#     """Decodes F using an independent Pauli model for the frame difference M xor F."""
-
-#     def __init__(
-#         self,
-#         code: StabilizerCode,
-#         px: float,
-#         py: float,
-#         pz: float,
-#     ):
-#         self.code = code
-#         self._difference_decoder: BiasedPoulinDecoder | None = None
-#         self.set_error_model(px, py, pz)
-
-#     def set_error_model(self, px: float, py: float, pz: float) -> None:
-#         rates = np.asarray([px, py, pz], dtype=np.float64)
-#         if not np.all(np.isfinite(rates)):
-#             raise ValueError("Pauli error probabilities must be finite")
-#         if np.any(rates < 0) or rates.sum() > 1:
-#             raise ValueError("px, py, and pz must be nonnegative and sum to at most 1")
-#         self.px = float(px)
-#         self.py = float(py)
-#         self.pz = float(pz)
-#         if self._difference_decoder is None:
-#             self._difference_decoder = BiasedPoulinDecoder(self.code, self.px, self.py, self.pz)
-#         else:
-#             self._difference_decoder.set_error_model(self.px, self.py, self.pz)
-
-#     def decode(
-#         self,
-#         syndrome_m: np.ndarray,
-#         syndrome_f: np.ndarray,
-#         logical_m: int | np.ndarray,
-#     ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-#         return self.decode_syndrome(syndrome_m, syndrome_f, logical_m)
-
-#     def decode_syndrome(
-#         self,
-#         syndrome_m: np.ndarray,
-#         syndrome_f: np.ndarray,
-#         logical_m: int | np.ndarray,
-#     ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-#         sm = np.asarray(syndrome_m, dtype=np.uint8)
-#         sf = np.asarray(syndrome_f, dtype=np.uint8)
-#         expected_width = self.code.n - self.code.k
-#         if sm.ndim != 2 or sm.shape[1] != expected_width:
-#             raise ValueError(f"syndrome_m must have shape (batch, {expected_width})")
-#         if sf.shape != sm.shape:
-#             raise ValueError("syndrome_f must have the same shape as syndrome_m")
-
-#         logical_input = np.asarray(logical_m)
-#         if not (np.issubdtype(logical_input.dtype, np.integer) or np.issubdtype(logical_input.dtype, np.bool_)):
-#             raise ValueError("logical_m must contain integer logical-class indices")
-#         if logical_input.ndim == 0:
-#             logical_indices = np.full(sm.shape[0], int(logical_input), dtype=np.int64)
-#         elif logical_input.shape == (sm.shape[0],):
-#             logical_indices = logical_input.astype(np.int64, copy=False)
-#         else:
-#             raise ValueError("logical_m must be a scalar or have shape (batch,)")
-#         logical_count = 4**self.code.k
-#         if np.any(logical_indices < 0) or np.any(logical_indices >= logical_count):
-#             raise ValueError(f"logical_m values must be in [0, {logical_count})")
-
-#         syndrome_d = sm ^ sf
-#         log_prob_d, recovery_options_d = (self._difference_decoder._decode_syndrome_node(syndrome_d, self.code))
-
-#         batch = np.arange(sm.shape[0])
-#         logical_f = np.arange(logical_count, dtype=np.int64)
-#         logical_d = logical_indices[:, None] ^ logical_f[None, :]
-#         conditional = log_prob_d[batch[:, None], logical_d].copy()
-#         self._normalize_conditional_or_raise(conditional)
-#         best_logical_f = np.argmax(conditional, axis=1)
-#         best_logical_d = logical_indices ^ best_logical_f
-#         recovery_d = recovery_options_d[batch, best_logical_d]
-
-#         logical_bits_m = _index_to_bits(logical_indices, 2 * self.code.k)
-#         logical_generators = np.concatenate([self.code.logical_x, self.code.logical_z], axis=0)
-#         canonical_m = (
-#             (sm @ self.code.pure_errors) % 2
-#             ^ (logical_bits_m @ logical_generators) % 2).astype(np.uint8)
-#         recovery = (canonical_m ^ recovery_d).astype(np.uint8)
-#         return recovery, {-1: conditional}
-
-#     @staticmethod
-#     def _normalize_conditional_or_raise(log_prob: np.ndarray) -> None:
-#         normalizer = scipy.special.logsumexp(log_prob, axis=1)
-#         impossible = ~np.isfinite(normalizer)
-#         if np.any(impossible):
-#             indices = np.flatnonzero(impossible).tolist()
-#             raise ValueError(
-#                 "P(syndrome_m, syndrome_f, logical_m) is zero for batch "
-#                 f"indices {indices}"
-#             )
-#         log_prob -= normalizer[:, None]
 
 class JointPoulinDecoder:
     """Decodes a final frame using the joint local channel P(M, M xor F).

@@ -3,7 +3,7 @@ from tqdm import tqdm
 from dorsim import (
     Circuit,
     PauliFrame,
-    BiasedPoulinDecoder,
+    CombinedPoulinDecoder,
     StabilizerCode,
     concat_code,
 )
@@ -49,7 +49,7 @@ def steane_concat_capacity():
         stab_list = code.stabilizers
         logical_list = np.concatenate([code.logical_x, code.logical_z], axis=0)
 
-        decoder_tele = BiasedPoulinDecoder(code, 1/4, 1/4, 1/4)
+        decoder_tele = CombinedPoulinDecoder(code, 1/4, 1/4, 1/4)
         for p in plist:
             num_fail_x = 0
             num_fail_y = 0
@@ -120,7 +120,7 @@ def one_task(code, p, batch, decoder_tele, stab):
         .m(ind_q[:n_q]) # measure Z errors
     )
 
-    #### Biased decoding
+    #### Combined decoding
     pframe = PauliFrame(circuit=circ, shots=batch)
     pframe.frame.fill(0) # turn it into code capacity simulation
     pframe.run()

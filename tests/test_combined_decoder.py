@@ -2,7 +2,6 @@ from __future__ import annotations
 import itertools
 import numpy as np
 from dorsim import (
-    BiasedPoulinDecoder,
     CombinedPoulinDecoder,
     CSSCode,
     JointPoulinDecoder,
@@ -42,26 +41,6 @@ def _all_pauli_frames(code: StabilizerCode) -> np.ndarray:
         list(itertools.product([0, 1], repeat=2 * code.n)),
         dtype=np.uint8,
     )
-
-
-def _combined_exhaustive(
-    code: StabilizerCode,
-    joint_md: np.ndarray,
-    recovery_m: np.ndarray,
-    syndrome_f: np.ndarray,
-) -> np.ndarray:
-    frames = _all_pauli_frames(code)
-    syndromes = _syndrome(frames, code)
-    logical = _internal_logical_index(frames, code)
-    f_keep = np.all(syndromes == syndrome_f, axis=1)
-    f = frames[f_keep]
-    m_pauli = recovery_m[: code.n] + 2 * recovery_m[code.n :]
-    f_pauli = f[:, : code.n] + 2 * f[:, code.n :]
-    difference = m_pauli[None, :] ^ f_pauli
-    weight = joint_md[m_pauli[None, :], difference].prod(axis=1)
-    result = np.zeros(4**code.k, dtype=np.float64)
-    np.add.at(result, logical[f_keep], weight)
-    return result / result.sum()
 
 
 def _joint_exhaustive(
@@ -146,10 +125,10 @@ def test_index_to_bits_is_inverse_of_bits_to_index():
     assert np.array_equal(_bits_to_index(bits), indices)
 
 
-def test_biased_c4_probabilities_match_exhaustive_enumeration():
+def test_combined_c4_probabilities_match_exhaustive_enumeration():
     code = CSSCode.c4()
     px, py, pz = 0.02, 0.01, 0.03
-    decoder = BiasedPoulinDecoder(code, px, py, pz)
+    decoder = CombinedPoulinDecoder(code, px, py, pz)
     syndromes = np.array(
         list(itertools.product([0, 1], repeat=code.n - code.k)),
         dtype=np.uint8,
@@ -182,7 +161,7 @@ def test_biased_c4_probabilities_match_exhaustive_enumeration():
     assert np.allclose(np.exp(result[-1]), expected)
 
 
-def test_biased_decoder_recovers_requested_syndromes():
+def test_combined_decoder_recovers_requested_syndromes():
     c4 = CSSCode.c4()
     codes = [
         _five_qubit_code(),
@@ -197,7 +176,7 @@ def test_biased_decoder_recovers_requested_syndromes():
             size=(8, code.n - code.k),
             dtype=np.uint8,
         )
-        recovery, result = BiasedPoulinDecoder(code, 0.01, 0.002, 0.03).decode_syndrome(syndromes)
+        recovery, result = CombinedPoulinDecoder(code, 0.01, 0.002, 0.03).decode_syndrome(syndromes)
         assert recovery.shape == (8, 2 * code.n)
         assert result[-1].shape == (8, 4**code.k)
         assert np.array_equal(_syndrome(recovery, code), syndromes)
@@ -210,7 +189,7 @@ def test_zero_probability_channels_do_not_produce_nan():
         list(itertools.product([0, 1], repeat=code.n - code.k)),
         dtype=np.uint8,
     )
-    decoder = BiasedPoulinDecoder(code, 0, 0, 0)
+    decoder = CombinedPoulinDecoder(code, 0, 0, 0)
     _, result = decoder.decode_syndrome(syndromes)
     assert not np.isnan(result[-1]).any()
 
@@ -219,48 +198,13 @@ def test_zero_probability_channels_do_not_produce_nan():
     assert not np.isnan(changed[-1]).any()
 
 
-def test_combined_decoder_matches_exhaustive_enumeration_and_recovery():
-    code = CSSCode.c4()
-    decoder = CombinedPoulinDecoder.from_ect_rates(code, 0.04, 0.07, 0.09)
-    syndrome_m = np.array([[0, 1], [1, 0]], dtype=np.uint8)
-    syndrome_f = np.array([[1, 1], [0, 1]], dtype=np.uint8)
-    recovery_m, _ = BiasedPoulinDecoder(
-        code,
-        0.06,
-        0.02,
-        0.09,
-    ).decode_syndrome(syndrome_m)
-
-    recovery, result = decoder.decode_syndrome(
-        syndrome_m,
-        syndrome_f,
-        recovery_m,
-    )
-    expected = np.stack(
-        [
-            _combined_exhaustive(code, decoder.joint_md, rm, sf)
-            for rm, sf in zip(recovery_m, syndrome_f)
-        ]
-    )
-
-    assert recovery.shape == (2, 2 * code.n)
-    assert result[-1].shape == (2, 4**code.k)
-    assert np.allclose(np.exp(result[-1]), expected)
-    assert np.array_equal(_syndrome(recovery, code), syndrome_f)
-    recovery_logical = _internal_logical_index(recovery, code)
-    assert np.allclose(
-        expected[np.arange(expected.shape[0]), recovery_logical],
-        expected.max(axis=1),
-    )
-
-
-def test_biased_decoder_returns_shared_internal_logical_index():
+def test_combined_decoder_returns_shared_internal_logical_index():
     code = _five_qubit_code()
     syndromes = np.array(
         [[0, 0, 0, 0], [1, 0, 1, 0]],
         dtype=np.uint8,
     )
-    decoder = BiasedPoulinDecoder(code, 0.07, 0.02, 0.08)
+    decoder = CombinedPoulinDecoder(code, 0.07, 0.02, 0.08)
     recovery, probabilities = decoder.decode_syndrome(syndromes)
     recovery_with_logical, logical, probabilities_with_logical = (
         decoder.decode_syndrome_with_logical(syndromes)
@@ -275,93 +219,7 @@ def test_biased_decoder_returns_shared_internal_logical_index():
     )
 
 
-def test_combined_decoder_retains_the_fixed_measurement_recovery():
-    code = CSSCode.c4()
-    decoder = CombinedPoulinDecoder.from_ect_rates(code, 0.03, 0.05, 0.08)
-    syndrome_d = np.array([[1, 1], [1, 1]], dtype=np.uint8)
-    syndrome_m = np.array([[0, 1], [1, 0]], dtype=np.uint8)
-    syndrome_f = syndrome_m ^ syndrome_d
-    recovery_m, _ = BiasedPoulinDecoder(
-        code,
-        0.07,
-        0.02,
-        0.09,
-    ).decode_syndrome(syndrome_m)
-
-    _, result = decoder.decode_syndrome(
-        syndrome_m,
-        syndrome_f,
-        recovery_m,
-    )
-    assert not np.allclose(result[-1][0], result[-1][1])
-
-
-def test_combined_decoder_recursive_result_matches_exhaustive_enumeration():
-    qp = CSSCode.qp()
-    code = concat_code(CSSCode.c4(), [qp, qp])
-    decoder = CombinedPoulinDecoder.from_ect_rates(code, 0.03, 0.06, 0.08)
-    syndrome_m = np.array([[0, 1]], dtype=np.uint8)
-    syndrome_f = np.array([[1, 1]], dtype=np.uint8)
-    recovery_m, _ = BiasedPoulinDecoder(
-        code,
-        0.06,
-        0.02,
-        0.09,
-    ).decode_syndrome(syndrome_m)
-
-    recovery, result = decoder.decode_syndrome(
-        syndrome_m,
-        syndrome_f,
-        recovery_m,
-    )
-    expected = _combined_exhaustive(
-        code,
-        decoder.joint_md,
-        recovery_m[0],
-        syndrome_f[0],
-    )
-
-    assert np.allclose(np.exp(result[-1][0]), expected)
-    assert np.array_equal(_syndrome(recovery, code), syndrome_f)
-    recovery_logical = _internal_logical_index(recovery, code)[0]
-    assert np.isclose(expected[recovery_logical], expected.max())
-
-
-def test_combined_decoder_rejects_invalid_and_impossible_inputs():
-    code = CSSCode.c4()
-    for invalid in [
-        np.ones((3, 4)) / 12,
-        np.full((4, 4), np.nan),
-        np.full((4, 4), -1 / 16),
-        np.ones((4, 4)),
-    ]:
-        with np.testing.assert_raises(ValueError):
-            CombinedPoulinDecoder(code, invalid)
-    with np.testing.assert_raises(ValueError):
-        CombinedPoulinDecoder.from_ect_rates(code, -0.1, 0, 0)
-
-    kernel = np.zeros((4, 4))
-    kernel[0, 0] = 1
-    decoder = CombinedPoulinDecoder(code, kernel)
-    zero = np.zeros((1, code.n - code.k), dtype=np.uint8)
-    nonzero = zero.copy()
-    nonzero[0, 0] = 1
-    recovery_m = np.zeros((1, 2 * code.n), dtype=np.uint8)
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(zero, nonzero, recovery_m)
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(zero, zero[:, :1], recovery_m)
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(zero, zero, recovery_m[:, :-1])
-    invalid_recovery = recovery_m.copy()
-    invalid_recovery[0, 0] = 2
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(zero, zero, invalid_recovery)
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(nonzero, zero, recovery_m)
-
-
-def test_joint_combined_ect_kernel_has_exact_marginals():
+def test_joint_ect_kernel_has_exact_marginals():
     code = StabilizerCode.steane()
     p_a, p_b, p_c = 0.03, 0.05, 0.08
     decoder = JointPoulinDecoder.from_ect_rates(
@@ -393,7 +251,7 @@ def test_joint_combined_ect_kernel_has_exact_marginals():
     assert np.allclose(decoder.joint_md.sum(axis=0), expected_d)
 
 
-def test_joint_combined_leaf_matches_exhaustive_enumeration_and_recovery():
+def test_joint_leaf_matches_exhaustive_enumeration_and_recovery():
     code = CSSCode.c4()
     decoder = JointPoulinDecoder.from_ect_rates(code, 0.04, 0.07, 0.09)
     syndrome_m = np.array([[0, 1], [1, 0]], dtype=np.uint8)
@@ -428,48 +286,7 @@ def test_joint_combined_leaf_matches_exhaustive_enumeration_and_recovery():
     )
 
 
-def test_joint_combined_factorized_kernel_matches_difference_decoder():
-    code = _five_qubit_code()
-    probability_m = np.array([0.82, 0.07, 0.08, 0.03])
-    probability_d = np.array([0.79, 0.09, 0.07, 0.05])
-    joint_md = probability_m[:, None] * probability_d[None, :]
-    joint = JointPoulinDecoder(code, joint_md)
-    combined = CombinedPoulinDecoder(code, joint_md)
-    syndrome_m = np.array(
-        [[0, 0, 0, 0], [1, 0, 1, 0]],
-        dtype=np.uint8,
-    )
-    syndrome_f = syndrome_m[::-1].copy()
-    recovery_m, _ = BiasedPoulinDecoder(
-        code,
-        probability_m[1],
-        probability_m[3],
-        probability_m[2],
-    ).decode_syndrome(syndrome_m)
-    logical_m = _internal_logical_index(recovery_m, code)
-    recovery_joint, result_joint = joint.decode_syndrome(
-        syndrome_m,
-        syndrome_f,
-        logical_m,
-    )
-    recovery_combined, result_combined = combined.decode_syndrome(
-        syndrome_m,
-        syndrome_f,
-        recovery_m,
-    )
-
-    assert np.allclose(result_joint[-1], result_combined[-1])
-    assert np.array_equal(
-        _syndrome(recovery_joint, code),
-        _syndrome(recovery_combined, code),
-    )
-    assert np.array_equal(
-        _internal_logical_index(recovery_joint, code),
-        _internal_logical_index(recovery_combined, code),
-    )
-
-
-def test_joint_combined_steane_uses_measurement_syndrome_history():
+def test_joint_steane_uses_measurement_syndrome_history():
     code = StabilizerCode.steane()
     decoder = JointPoulinDecoder.from_ect_rates(code, 0.06, 0.06, 0.06)
     syndrome_m = np.array([[0, 0, 1, 0, 1, 0]], dtype=np.uint8)
@@ -486,7 +303,7 @@ def test_joint_combined_steane_uses_measurement_syndrome_history():
     assert np.argmax(result[-1], axis=1)[0] == 2
 
 
-def test_joint_combined_recursive_result_matches_exhaustive_enumeration():
+def test_joint_recursive_result_matches_exhaustive_enumeration():
     qp = CSSCode.qp()
     code = concat_code(CSSCode.c4(), [qp, qp])
     decoder = JointPoulinDecoder.from_ect_rates(code, 0.03, 0.06, 0.08)
@@ -515,7 +332,7 @@ def test_joint_combined_recursive_result_matches_exhaustive_enumeration():
     assert np.isclose(expected_f[recovery_logical], expected_f.max())
 
 
-def test_joint_combined_rejects_invalid_and_impossible_inputs():
+def test_joint_rejects_invalid_and_impossible_inputs():
     code = CSSCode.c4()
     for invalid in [
         np.ones((3, 4)) / 12,
@@ -546,4 +363,4 @@ if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("test_biased_decoder ok")
+    print("test_combined_decoder ok")

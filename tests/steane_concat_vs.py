@@ -3,7 +3,7 @@ from tqdm import tqdm
 from dorsim import (
     Circuit,
     PauliFrame,
-    BiasedPoulinDecoder,
+    CombinedPoulinDecoder,
     JointPoulinDecoder,
     StabilizerCode,
     concat_code,
@@ -42,43 +42,42 @@ def steane_concat_run():
 
     num_fail_list = []
     num_total_list = []
-    num_fail_list_biased = []
-    num_total_list_biased = []
+    num_fail_list_joint = []
+    num_total_list_joint = []
 
     for level_i in level_list:
         code = code_list[level_i-1]
         stab_list = code.stabilizers
         logical_list = np.concatenate([code.logical_x, code.logical_z], axis=0)
 
-        decoder_biased = BiasedPoulinDecoder(code, 1/4, 1/4, 1/4)
+        decoder_combined = CombinedPoulinDecoder(code, 1/4, 1/4, 1/4)
 
         for p in plist:
             decoder_joint = JointPoulinDecoder.from_ect_rates(
                 code,
                 p,
                 p,
-                p,
-            )
+                p)
             num_fail = 0
             num_total = 0
-            num_fail_biased = 0
-            num_total_biased = 0
+            num_fail_joint = 0
+            num_total_joint = 0
 
             for _ in tqdm(range(num_sample//batch_size), desc=f"level={level_i}, p={p:.3f}"):
-                re = one_task(code, p, batch_size, stab_list, logical_list, [decoder_biased, decoder_joint])
+                re = one_task(code, p, batch_size, stab_list, logical_list, [decoder_combined, decoder_joint])
                 num_fail += re[0][0]
                 num_total += re[0][1]
-                num_fail_biased += re[1][0]
-                num_total_biased += re[1][1]
+                num_fail_joint += re[1][0]
+                num_total_joint += re[1][1]
 
             num_fail_list.append(num_fail)
             num_total_list.append(num_total)
-            num_fail_list_biased.append(num_fail_biased)
-            num_total_list_biased.append(num_total_biased)
+            num_fail_list_joint.append(num_fail_joint)
+            num_total_list_joint.append(num_total_joint)
     num_fail_list = np.array(num_fail_list, dtype=np.int64).reshape(len(level_list), -1)
     num_total_list = np.array(num_total_list, dtype=np.int64).reshape(len(level_list), -1)
-    num_fail_list_biased = np.array(num_fail_list_biased, dtype=np.int64).reshape(len(level_list), -1)
-    num_total_list_biased = np.array(num_total_list_biased, dtype=np.int64).reshape(len(level_list), -1)
+    num_fail_list_joint = np.array(num_fail_list_joint, dtype=np.int64).reshape(len(level_list), -1)
+    num_total_list_joint = np.array(num_total_list_joint, dtype=np.int64).reshape(len(level_list), -1)
 
     fig,ax = plt.subplots()
     for ind0 in range(len(level_list)):
@@ -86,8 +85,8 @@ def steane_concat_run():
         std_err = (logical_errors*(1-logical_errors)/num_total_list[ind0])**0.5
         ax.errorbar(plist, logical_errors, yerr=std_err, label="isotropic, level={}".format(level_list[ind0]))
     for ind0 in range(len(level_list)):
-        logical_errors = num_fail_list_biased[ind0]/num_total_list_biased[ind0]
-        std_err = (logical_errors*(1-logical_errors)/num_total_list_biased[ind0])**0.5
+        logical_errors = num_fail_list_joint[ind0]/num_total_list_joint[ind0]
+        std_err = (logical_errors*(1-logical_errors)/num_total_list_joint[ind0])**0.5
         ax.errorbar(plist, logical_errors, yerr=std_err, linestyle='--', label="joint, level={}".format(level_list[ind0]))
     # ax.plot(plist, plist, '-.', label='y=x')
     # ax.set_xlim(0, 5)
@@ -101,7 +100,7 @@ def steane_concat_run():
     fig.savefig('test.png', dpi=200)
 
 def one_task(code, p, batch, stab, logical, decoder_list):
-    decoder_biased = decoder_list[0]
+    decoder_combined = decoder_list[0]
     decoder_joint = decoder_list[1]
 
 
@@ -140,27 +139,27 @@ def one_task(code, p, batch, stab, logical, decoder_list):
     error_copy = error.copy()
     frame_copy = frame.copy()
 
-    #### Unbiased decoding
+    #### Isotropic decoding
     ## Knill correction
     syn0 = matmul_gf4(error, stab.T)
-    decoder_biased.set_error_model(p/3, p/3, p/3) ########### set the ECT error distribution
-    re0, prob_L = decoder_biased.decode(syn0)
+    decoder_combined.set_error_model(p/3, p/3, p/3) ########### set the ECT error distribution
+    re0, prob_L = decoder_combined.decode(syn0)
     tmp0 = (frame + (error + re0)) % 2
     ## Count the failures
     syn1 = matmul_gf4(tmp0, stab.T)
-    decoder_biased.set_error_model(p/3, p/3, p/3) ########### set the output state distribution
-    re1, prob_L = decoder_biased.decode(syn1)
+    decoder_combined.set_error_model(p/3, p/3, p/3) ########### set the output state distribution
+    re1, prob_L = decoder_combined.decode(syn1)
     tmp1 = (tmp0 + re1) % 2
 
     num_fail = int(matmul_gf4(tmp1, check_list.T).max(axis=1).sum())
     num_total = tmp0.shape[0]
 
-    #### Biased decoding
+    #### Joint decoding
     ## Knill correction
     syn0 = matmul_gf4(error_copy, stab.T)
     ########### set the ECT error distribution
-    decoder_biased.set_error_model((1 - r_a*r_b)/4, (1 - r_a*r_b)/4, (1 + r_a*r_b - 2*r_a*r_b*r_c)/4) # p_a, p_b, p_c
-    re0, ind_l, prob_L = decoder_biased.decode_syndrome_with_logical(syn0)
+    decoder_combined.set_error_model((1 - r_a*r_b)/4, (1 - r_a*r_b)/4, (1 + r_a*r_b - 2*r_a*r_b*r_c)/4) # p_a, p_b, p_c
+    re0, ind_l, prob_L = decoder_combined.decode_syndrome_with_logical(syn0)
     tmp0 = (frame_copy + (error_copy + re0)) % 2
     ## Count the failures
     syn1 = matmul_gf4(tmp0, stab.T)
@@ -168,11 +167,11 @@ def one_task(code, p, batch, stab, logical, decoder_list):
     re1, prob_L = decoder_joint.decode(syn0, syn1, ind_l)
     tmp1 = (tmp0 + re1) % 2
 
-    num_fail_biased = int(matmul_gf4(tmp1, check_list.T).max(axis=1).sum())
-    num_total_biased = tmp0.shape[0]
+    num_fail_joint = int(matmul_gf4(tmp1, check_list.T).max(axis=1).sum())
+    num_total_joint = tmp0.shape[0]
 
     return [[num_fail, num_total],
-            [num_fail_biased, num_total_biased]]
+            [num_fail_joint, num_total_joint]]
 
 
 if __name__ == "__main__":

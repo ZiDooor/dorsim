@@ -7,8 +7,7 @@ from .stab_code import (
     get_c4c6_code,
 )
 from .decoder import (
-    BiasedPoulinDecoder,
-    # CombinedPoulinDecoder,
+    CombinedPoulinDecoder,
     JointPoulinDecoder,
     KnillDecoder,
     PoulinDecoder,
@@ -18,7 +17,6 @@ from .tableau_sim import TableauSim
 
 # Define the public API of the dorsim package
 __all__ = [
-    "BiasedPoulinDecoder",
     "CombinedPoulinDecoder",
     "CSSCode",
     "Circuit",
