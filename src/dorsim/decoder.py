@@ -273,6 +273,8 @@ class PoulinDecoder:
 
 
 class CombinedPoulinDecoder:
+    _LIKELIHOOD_TIE_ATOL = 1e-12
+
     def __init__(
         self,
         code: StabilizerCode,
@@ -297,11 +299,17 @@ class CombinedPoulinDecoder:
     def decode(self, syndrome: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
         return self.decode_syndrome(syndrome)
 
+    @classmethod
+    def _best_logical_class(cls, log_prob: np.ndarray) -> np.ndarray:
+        maximum = np.max(log_prob, axis=1, keepdims=True)
+        tied = log_prob >= maximum - cls._LIKELIHOOD_TIE_ATOL
+        return np.argmax(tied, axis=1)
+
     def decode_syndrome(self, syndrome: np.ndarray) -> tuple[np.ndarray, dict[int, np.ndarray]]:
         s = np.asarray(syndrome, dtype=np.uint8)
         assert s.ndim == 2 and s.shape[1] == self.code.n - self.code.k
         log_prob, recovery_options = self._decode_syndrome_node(s, self.code)
-        best_logical = np.argmax(log_prob, axis=1)
+        best_logical = self._best_logical_class(log_prob)
         recovery = recovery_options[np.arange(s.shape[0]), best_logical].astype(np.uint8)
         return recovery, {-1: log_prob}
 
@@ -310,7 +318,7 @@ class CombinedPoulinDecoder:
         syndrome: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, dict[int, np.ndarray]]:
         recovery, probabilities = self.decode_syndrome(syndrome)
-        best_logical = np.argmax(probabilities[-1], axis=1)
+        best_logical = self._best_logical_class(probabilities[-1])
         return recovery, best_logical, probabilities
 
     def _decode_syndrome_node(
