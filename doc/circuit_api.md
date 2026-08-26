@@ -40,6 +40,21 @@ Circuit(4).cx([0, 1, 2, 3]).operations
 
 The API is iterable-only. Use lists, tuples, ranges, or other iterables.
 
+## Combining Circuits
+
+`combine` creates a new circuit whose operations run sequentially. Operations from
+the first circuit come before operations from the second circuit:
+
+```python
+first = Circuit(2).h([0]).m([0])
+second = Circuit(3).x([2]).m([2])
+combined = first.combine(second)
+```
+
+`combined` has three qubits and contains the operations from `first`, followed by
+the operations from `second`. Qubit indices are shared and are not shifted. The
+two input circuits are unchanged.
+
 ## Single-Qubit Gates
 
 These helpers apply the same gate to each target:

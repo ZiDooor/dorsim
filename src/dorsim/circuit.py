@@ -46,6 +46,15 @@ class Circuit:
         self.operations.append(Operation(name.upper(), tuple(self._target(t) for t in targets), float(p)))
         return self
 
+    def combine(self, other: "Circuit") -> "Circuit":
+        """Return a new circuit containing this circuit followed by ``other``."""
+        if not isinstance(other, Circuit):
+            raise TypeError("other must be a Circuit")
+
+        out = Circuit(max(self.num_qubits, other.num_qubits))
+        out.operations = [*self.operations, *other.operations]
+        return out
+
     def h(self, targets: Iterable[int]) -> "Circuit":
         for q in targets:
             self.append("H", q)
