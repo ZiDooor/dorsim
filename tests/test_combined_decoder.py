@@ -332,33 +332,6 @@ def test_joint_recursive_result_matches_exhaustive_enumeration():
     assert np.isclose(expected_f[recovery_logical], expected_f.max())
 
 
-def test_joint_rejects_invalid_and_impossible_inputs():
-    code = CSSCode.c4()
-    for invalid in [
-        np.ones((3, 4)) / 12,
-        np.full((4, 4), np.nan),
-        np.full((4, 4), -1 / 16),
-        np.ones((4, 4)),
-    ]:
-        with np.testing.assert_raises(ValueError):
-            JointPoulinDecoder(code, invalid)
-    with np.testing.assert_raises(ValueError):
-        JointPoulinDecoder.from_ect_rates(code, -0.1, 0, 0)
-
-    kernel = np.zeros((4, 4))
-    kernel[0, 0] = 1
-    decoder = JointPoulinDecoder(code, kernel)
-    zero = np.zeros((1, code.n - code.k), dtype=np.uint8)
-    nonzero = zero.copy()
-    nonzero[0, 0] = 1
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(zero, nonzero, 0)
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(zero, zero[:, :1], 0)
-    with np.testing.assert_raises(ValueError):
-        decoder.decode_syndrome(zero, zero, 4**code.k)
-
-
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):

@@ -412,11 +412,16 @@ class CombinedPoulinDecoder:
 
 
 class JointPoulinDecoder:
-    """Decodes a final frame using the joint local channel P(M, M xor F).
+    """Recover the post-teleportation frame F' using s_M, s_F', and logical_m.
 
-    The rows and columns of ``joint_md`` use the binary-symplectic Pauli
-    ordering ``[I, X, Z, Y]``.  The decoder retains the correlation between
-    the measurement frame M and the difference frame D = M xor F.
+    ``logical_m`` is the first decoder's selected logical-class index in
+    R(s_M), not the unknown true logical class of the measurement frame M.
+    The internal channel retains the correlation between M and D = M xor F,
+    where F is the output frame before teleportation correction.
+
+    Callers supply a valid code and a normalized, finite, strictly positive
+    (4, 4) ``joint_md`` array, ordered [I, X, Z, Y] on both axes. Inputs are
+    trusted throughout this class; invalid-input behavior is unspecified.
     """
 
     _MAX_CONTRACTION_CELLS = 1_000_000
@@ -440,13 +445,11 @@ class JointPoulinDecoder:
         p_b: float,
         p_c: float,
     ) -> "JointPoulinDecoder":
-        """Construct the exact local P(M, D) kernel for the ECT circuit."""
-        rates = np.asarray([p_a, p_b, p_c], dtype=np.float64)
-        if not np.all(np.isfinite(rates)):
-            raise ValueError("ECT depolarizing probabilities must be finite")
-        if np.any(rates < 0) or np.any(rates > 1):
-            raise ValueError("ECT depolarizing probabilities must be in [0, 1]")
+        """Construct the ECT channel from trusted depolarizing rates.
 
+        Supply finite rates in [0, 1] that produce a strictly positive kernel.
+        """
+        rates = np.asarray([p_a, p_b, p_c], dtype=np.float64)
         pauli_probabilities = [
             np.array([1 - p, p / 3, p / 3, p / 3], dtype=np.float64)
             for p in rates
@@ -467,16 +470,8 @@ class JointPoulinDecoder:
         return cls(code, joint_md)
 
     def set_joint_error_model(self, joint_md: np.ndarray) -> None:
-        kernel = np.asarray(joint_md, dtype=np.float64)
-        if kernel.shape != (4, 4):
-            raise ValueError("joint_md must have shape (4, 4)")
-        if not np.all(np.isfinite(kernel)):
-            raise ValueError("joint_md probabilities must be finite")
-        if np.any(kernel < 0):
-            raise ValueError("joint_md probabilities must be nonnegative")
-        if not np.isclose(kernel.sum(), 1.0, rtol=1e-12, atol=1e-12):
-            raise ValueError("joint_md probabilities must sum to 1")
-        self.joint_md = kernel.copy()
+        """Copy a trusted positive, normalized (4, 4) channel; clear leaf tables."""
+        self.joint_md = np.array(joint_md, dtype=np.float64, copy=True)
         self._leaf_table_cache = {}
 
     def decode(
@@ -485,6 +480,7 @@ class JointPoulinDecoder:
         syndrome_f: np.ndarray,
         logical_m: int | np.ndarray,
     ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        """Alias for decode_syndrome; syndrome_f is the syndrome of F'."""
         return self.decode_syndrome(syndrome_m, syndrome_f, logical_m)
 
     def decode_syndrome(
@@ -493,52 +489,46 @@ class JointPoulinDecoder:
         syndrome_f: np.ndarray,
         logical_m: int | np.ndarray,
     ) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+        """Return a physical recovery for F' and its logical log posterior.
+
+        Supply binary ``syndrome_m`` and ``syndrome_f`` arrays of shape
+        (batch, code.n - code.k), representing s_M and s_F' respectively.
+        ``logical_m`` is an integer scalar or (batch,) array in [0, 4**k),
+        giving the logical-class index of the first recovery R(s_M).
+
+        The uint8 recovery has shape (batch, 2*code.n) and equals
+        E(s_F') xor the predicted logical operator. The dictionary entry -1
+        contains normalized natural-log probabilities of shape (batch, 4**k).
+        Exactly tied final classes select the first index. No input validity
+        checks are performed.
+        """
         sm = np.asarray(syndrome_m, dtype=np.uint8)
         sf = np.asarray(syndrome_f, dtype=np.uint8)
-        expected_width = self.code.n - self.code.k
-        if sm.ndim != 2 or sm.shape[1] != expected_width:
-            raise ValueError(f"syndrome_m must have shape (batch, {expected_width})")
-        if sf.shape != sm.shape:
-            raise ValueError("syndrome_f must have the same shape as syndrome_m")
-
-        logical_input = np.asarray(logical_m)
-        if not (
-            np.issubdtype(logical_input.dtype, np.integer)
-            or np.issubdtype(logical_input.dtype, np.bool_)
-        ):
-            raise ValueError("logical_m must contain integer logical-class indices")
-        if logical_input.ndim == 0:
-            logical_indices = np.full(sm.shape[0], int(logical_input), dtype=np.int64)
-        elif logical_input.shape == (sm.shape[0],):
-            logical_indices = logical_input.astype(np.int64, copy=False)
-        else:
-            raise ValueError("logical_m must be a scalar or have shape (batch,)")
+        logical_indices = np.broadcast_to(
+            np.asarray(logical_m, dtype=np.int64), (sm.shape[0],)
+        )
         logical_count = 4**self.code.k
-        if np.any(logical_indices < 0) or np.any(logical_indices >= logical_count):
-            raise ValueError(f"logical_m values must be in [0, {logical_count})")
 
         sd = sm ^ sf
         joint_log_prob = self._decode_joint_node(sm, sd, self.code)
         log_prob_d = scipy.special.logsumexp(joint_log_prob, axis=1)
-        self._normalize_last_axis_or_raise(
-            log_prob_d,
-            "P(syndrome_m, syndrome_f) is zero for batch")
+        log_prob_d -= scipy.special.logsumexp(log_prob_d, axis=1)[:, None]
 
         batch = np.arange(sm.shape[0])
         logical_f = np.arange(logical_count, dtype=np.int64)
         logical_d = logical_indices[:, None] ^ logical_f[None, :]
         conditional_f = log_prob_d[batch[:, None], logical_d].copy()
-        self._normalize_last_axis_or_raise(
-            conditional_f,
-            "P(syndrome_m, syndrome_f, logical_m) is zero for batch",
-        )
         best_logical_f = np.argmax(conditional_f, axis=1)
-        best_logical_d = logical_indices ^ best_logical_f
 
-        logical_generators = np.concatenate([self.code.logical_x, self.code.logical_z], axis=0)
-        canonical_m = ((sm @ self.code.pure_errors) % 2 ^ (_index_to_bits(logical_indices, 2 * self.code.k) @ logical_generators) % 2).astype(np.uint8)
-        canonical_d = ((sd @ self.code.pure_errors) % 2 ^ (_index_to_bits(best_logical_d, 2 * self.code.k) @ logical_generators) % 2).astype(np.uint8)
-        recovery = (canonical_m ^ canonical_d).astype(np.uint8)
+        # Construct E(s_F') xor the predicted final logical operator directly.
+        logical_generators = np.concatenate(
+            [self.code.logical_x, self.code.logical_z], axis=0
+        )
+        logical_bits = _index_to_bits(best_logical_f, 2 * self.code.k)
+        recovery = (
+            ((sf @ self.code.pure_errors) % 2)
+            ^ ((logical_bits @ logical_generators) % 2)
+        ).astype(np.uint8)
         return recovery, {-1: conditional_f}
 
     def _decode_joint_node(
@@ -739,15 +729,3 @@ class JointPoulinDecoder:
         result[np.isposinf(maximum)] = np.inf
         result[np.isnan(maximum)] = np.nan
         return result
-
-    @staticmethod
-    def _normalize_last_axis_or_raise(
-        log_probability: np.ndarray,
-        message: str,
-    ) -> None:
-        normalizer = scipy.special.logsumexp(log_probability, axis=1)
-        impossible = ~np.isfinite(normalizer)
-        if np.any(impossible):
-            indices = np.flatnonzero(impossible).tolist()
-            raise ValueError(f"{message} indices {indices}")
-        log_probability -= normalizer[:, None]
