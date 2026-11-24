@@ -40,6 +40,13 @@ Circuit(4).cx([0, 1, 2, 3]).operations
 
 The API is iterable-only. Use lists, tuples, ranges, or other iterables.
 
+For direct construction, `circuit.append(name, *targets, p=0.0)` appends
+one operation and returns the same circuit. Names are uppercased; use internal
+names such as `S_DAG`, `M`, and `DEPOLARIZE1`. This low-level method does not
+validate supported names or split flat pairs into separate operations.
+`circuit.num_qubits` stores the register size and `circuit.operations` stores
+the ordered list. Prefer the gate helpers when possible.
+
 ## Combining Circuits
 
 `combine` creates a new circuit whose operations run sequentially. Operations from

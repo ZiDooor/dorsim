@@ -167,3 +167,20 @@ circuit.without_noise()
 Use `PauliFrame` to include noise in many-shot samples.
 
 For lower-level gate update math, see [Update Rules](update_rules.md).
+
+## Manual Tableau Operations
+
+For manual updates, `append_gate_after_circuit(op)` and
+`prepend_gate_before_circuit(op)` mutate the current tableau using an
+`Operation`; they do not edit the stored circuit. These methods implement
+the two update directions explained in Update Rules.
+
+`measure_z(q, record=True)` and `measure_x(q, record=True)` return a binary
+reference outcome and collapse the current state when necessary.
+`measure_row(row, record=True)` is their lower-level implementation: rows
+`q` and `n+q` correspond to X and Z measurements, respectively.
+`record=False` suppresses measurement bookkeeping. `reset_z(q)` performs
+an unrecorded Z measurement and forces the reference state to zero.
+`format_row(row)` formats one signed Pauli row; `format_tableau()` formats
+all rows. For ordinary circuit simulation use `run()` on a fresh simulator
+instead of mixing these manual operations with a full circuit replay.

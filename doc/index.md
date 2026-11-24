@@ -56,13 +56,23 @@ samples = measurement_flips ^ reference[None, :]
 - [PauliFrame](pauli_frame.md): how many-shot Pauli-frame simulation works.
 - [Examples](examples.md): copy-paste simulation examples.
 - [Update Rules](update_rules.md): math details for appending and prepending gates.
+- [Stabilizer Codes](stabilizer_codes.md): code matrices, built-in codes, syndromes,
+  and concatenation.
+- [Decoders](decoders.md): all four decoders, calling conventions, noise models,
+  and error-correcting teleportation.
+- [Source Modules And Lower-Level Helpers](development.md): Pauli arithmetic,
+  Clifford conjugation, command-line demo, and Stim checks.
 
 ## Public API
 
 The main package imports are:
 
 ```python
-from dorsim import Circuit, Operation, TableauSim, PauliFrame, target_rec
+from dorsim import (
+    Circuit, Operation, TableauSim, PauliFrame, target_rec,
+    StabilizerCode, CSSCode, concat_code, get_c4c6_code,
+    KnillDecoder, PoulinDecoder, CombinedPoulinDecoder, JointPoulinDecoder,
+)
 ```
 
 `target_rec(-k)` is used for Stim-style feedback such as:

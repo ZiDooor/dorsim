@@ -7,66 +7,83 @@ from .stab_code import CSSCode, StabilizerCode, get_c4c6_code
 
 
 class KnillDecoder:
+    """Decode CSS C4/C6 measurement flips in the supplied logical basis.
+
+    ``basis`` names the measurement basis, not the error component. Change
+    base code definitions before concatenating so the code tree is consistent.
+    """
     ERASURE = -1
 
     def __init__(self, seed: int | None = None):
         self.rng = np.random.default_rng(seed)
 
-    def decode_qp(self, measurement_flips: np.ndarray) -> np.ndarray:
-        m = np.asarray(measurement_flips, dtype=np.uint8)
-        assert m.shape[1] == 2
-        return m.astype(np.int8).copy()
+    @staticmethod
+    def _measurement_matrices(code: CSSCode, basis: str) -> tuple[np.ndarray, np.ndarray]:
+        if basis == "Z":
+            check = code.stabilizers[:, code.n :]
+            logical = code.get_lz()
+        elif basis == "X":
+            check = code.stabilizers[:, : code.n]
+            logical = code.get_lx()
+        else:
+            raise ValueError("basis must be 'X' or 'Z'")
+        return check[np.any(check, axis=1)].astype(np.uint8), logical.astype(np.uint8)
 
-    def decode_c4(self, measurement_flips: np.ndarray) -> np.ndarray:
+    def _decode_leaf(self, measurement_flips: np.ndarray, code: CSSCode, basis: str) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
-        assert m.shape[1] == 4
-        logical = np.full((m.shape[0], 2), self.ERASURE, dtype=np.int8)
-        parity = np.bitwise_xor.reduce(m, axis=1)
-        keep = parity == 0
-        logical[keep, 0] = m[keep, 0] ^ m[keep, 2]
-        logical[keep, 1] = m[keep, 2] ^ m[keep, 3]
+        assert m.ndim == 2 and m.shape[1] == code.n and code.k == 2
+        check, operators = self._measurement_matrices(code, basis)
+        logical = ((m @ operators.T) % 2).astype(np.int8)
+        logical[np.any((m @ check.T) % 2, axis=1)] = self.ERASURE
         return logical
 
-    def decode_c6_children(self, child_logicals: np.ndarray) -> np.ndarray:
+    def decode_qp(
+        self, measurement_flips: np.ndarray, code: CSSCode | None = None, *, basis: str = "Z"
+    ) -> np.ndarray:
+        code = CSSCode.qp() if code is None else code
+        assert code.n == 2
+        return self._decode_leaf(measurement_flips, code, basis)
+
+    def decode_c4(
+        self, measurement_flips: np.ndarray, code: CSSCode | None = None, *, basis: str = "Z"
+    ) -> np.ndarray:
+        code = CSSCode.c4() if code is None else code
+        assert code.n == 4
+        return self._decode_leaf(measurement_flips, code, basis)
+
+    def decode_c6_children(
+        self, child_logicals: np.ndarray, code: CSSCode | None = None, *, basis: str = "Z"
+    ) -> np.ndarray:
+        code = CSSCode.c6() if code is None else code
+        assert code.n == 6 and code.k == 2
+        check, operators = self._measurement_matrices(code, basis)
         d = np.asarray(child_logicals, dtype=np.int8).copy()
+        assert d.ndim == 3 and d.shape[1:] == (3, 2)
         shots = d.shape[0]
         logical = np.full((shots, 2), self.ERASURE, dtype=np.int8)
         erased = np.any(d == self.ERASURE, axis=2)
         erasure_count = erased.sum(axis=1)
 
         one = erasure_count == 1
+        keep = erasure_count == 0
+        assignments = np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=np.int8)
         for erased_child in range(3):
             mask = one & erased[:, erased_child]
             if not np.any(mask):
                 continue
-            a1 = d[mask, 0, 0]
-            a2 = d[mask, 0, 1]
-            b1 = d[mask, 1, 0]
-            b2 = d[mask, 1, 1]
-            c1 = d[mask, 2, 0]
-            c2 = d[mask, 2, 1]
-            if erased_child == 0:
-                d[mask, 0, 0] = b2 ^ c1 ^ c2
-                d[mask, 0, 1] = b1 ^ b2 ^ c1
-            elif erased_child == 1:
-                d[mask, 1, 0] = a1 ^ a2 ^ c2
-                d[mask, 1, 1] = a1 ^ c1 ^ c2
-            else:
-                d[mask, 2, 0] = a2 ^ b1 ^ b2
-                d[mask, 2, 1] = a1 ^ a2 ^ b1
+            known = d[mask].reshape(-1, 6)
+            start = 2 * erased_child
+            known[:, start : start + 2] = 0
+            syndrome = (known @ check.T) % 2
+            assignment_syndromes = (assignments @ check[:, start : start + 2].T) % 2
+            matches = np.all(syndrome[:, None, :] == assignment_syndromes[None, :, :], axis=2)
+            unique = matches.sum(axis=1) == 1
+            d[mask, erased_child] = assignments[np.argmax(matches, axis=1)]
+            keep[mask] = unique
 
-        no_erasure = erasure_count == 0
-        a1 = d[:, 0, 0]
-        a2 = d[:, 0, 1]
-        b1 = d[:, 1, 0]
-        b2 = d[:, 1, 1]
-        c1 = d[:, 2, 0]
-        c2 = d[:, 2, 1]
-        s1_ok = (a1 ^ b2 ^ c1 ^ c2) == 0
-        s2_ok = (a1 ^ a2 ^ b1 ^ c2) == 0
-        keep = one | (no_erasure & s1_ok & s2_ok)
-        logical[keep, 0] = b1[keep] ^ b2[keep] ^ c2[keep]
-        logical[keep, 1] = b2[keep] ^ c1[keep]
+        bits = d.reshape(shots, 6)
+        keep &= np.all((bits @ check.T) % 2 == 0, axis=1)
+        logical[keep] = (bits[keep] @ operators.T) % 2
         return logical
 
     def decode_code(
@@ -74,24 +91,28 @@ class KnillDecoder:
         measurement_flips: np.ndarray,
         code: CSSCode,
         final: bool = False,
+        *,
+        basis: str = "Z",
     ) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
-        assert m.shape[1] == code.n
+        assert m.ndim == 2 and m.shape[1] == code.n
         if code.name == "Qp" and not code.children:
-            logical = self.decode_qp(m)
+            logical = self.decode_qp(m, code, basis=basis)
         elif code.name == "C4" and not code.children:
-            logical = self.decode_c4(m)
+            logical = self.decode_c4(m, code, basis=basis)
+        elif code.name == "C6" and not code.children:
+            logical = self.decode_c6_children(m.reshape(m.shape[0], 3, 2), code, basis=basis)
         else:
             assert len(code.children) == 3
             child_results = []
             offset = 0
             for child in code.children:
                 child_results.append(
-                    self.decode_code(m[:, offset : offset + child.n], child)
+                    self.decode_code(m[:, offset : offset + child.n], child, basis=basis)
                 )
                 offset += child.n
             child_logicals = np.stack(child_results, axis=1)
-            logical = self.decode_c6_children(child_logicals)
+            logical = self.decode_c6_children(child_logicals, code.parent, basis=basis)
 
         if final: # 0/1 for 50/50 probability
             erased = np.all(logical == self.ERASURE, axis=1)
@@ -99,11 +120,13 @@ class KnillDecoder:
             logical = logical.astype(np.uint8)
         return logical
 
-    def decode_c4c6(self, measurement_flips: np.ndarray, level: int) -> np.ndarray:
+    def decode_c4c6(
+        self, measurement_flips: np.ndarray, level: int, *, basis: str = "Z"
+    ) -> np.ndarray:
         m = np.asarray(measurement_flips, dtype=np.uint8)
         code = get_c4c6_code(level)
         assert m.shape[1] == code.n
-        return self.decode_code(m, code, final=True)
+        return self.decode_code(m, code, final=True, basis=basis)
 
 
 def _bits_to_index(bits: np.ndarray) -> np.ndarray:
@@ -273,6 +296,7 @@ class PoulinDecoder:
 
 
 class CombinedPoulinDecoder:
+    """syndrome: (X-error syndrome, Z-error syndrome)"""
     _LIKELIHOOD_TIE_ATOL = 1e-12
 
     def __init__(

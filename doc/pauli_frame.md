@@ -171,7 +171,7 @@ directly.
 Important examples:
 
 ```text
-H(q):       swap Xq and Zq rows
+H(q):       swap Xq and Zq columns
 S(q):       Zq ^= Xq
 S_DAG(q):   Zq ^= Xq
 CX(a, b):   Xb ^= Xa, Za ^= Zb

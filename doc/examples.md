@@ -31,7 +31,7 @@ print("equal results:", (frames.samples[:, 0] == frames.samples[:, 1]).all())
 Expected shapes:
 
 ```text
-flips shape: (2, 8)
+flips shape: (8, 2)
 samples shape: (8, 2)
 equal results: True
 ```

@@ -5,6 +5,5 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 inverse_tableau_sim.py
-tests/test.*
-tests/pictures
+tests/
 *.egg-info/
